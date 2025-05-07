@@ -2,7 +2,7 @@ use alloy::{
     eips::{BlockId, BlockNumberOrTag},
     network::TransactionBuilder,
     primitives::U256,
-    providers::{Provider, ProviderBuilder, WsConnect},
+    providers::{Provider, ProviderBuilder},
 };
 use artemis_light::{
     collectors::{block_collector::BlockCollector, mempool_collector::MempoolCollector},
@@ -17,13 +17,12 @@ use std::sync::Arc;
 
 use alloy::node_bindings::{Anvil, AnvilInstance};
 
-/// Spawns Anvil and instantiates an Http provider.
+/// Spawns Anvil and instantiates a WebSocket provider.
 pub async fn spawn_anvil() -> Result<(impl Provider, AnvilInstance)> {
     let anvil = Anvil::new().block_time(1).chain_id(1337).try_spawn()?;
     let rpc_url = anvil.ws_endpoint();
     println!("RPC URL: {rpc_url}");
-    let ws = WsConnect::new(&rpc_url);
-    let provider = ProviderBuilder::new().connect_ws(ws).await?;
+    let provider = ProviderBuilder::new().connect(&rpc_url).await?;
     Ok((provider, anvil))
 }
 

@@ -5,7 +5,7 @@ use alloy::{
     providers::{Provider, ProviderBuilder, WsConnect},
 };
 use artemis_light::{
-    collectors::{block_collector::BlockCollector, mempool_collector::MempoolCollector},
+    collectors::{BlockCollector, MempoolCollector},
     executors::mempool_executor::{MempoolExecutor, SubmitTxToMempool},
     types::{Collector, Executor},
 };
@@ -23,7 +23,7 @@ pub async fn spawn_anvil() -> Result<(impl Provider, AnvilInstance)> {
     let rpc_url = anvil.ws_endpoint();
     println!("RPC URL: {rpc_url}");
     let ws = WsConnect::new(&rpc_url);
-    let provider = ProviderBuilder::new().connect_ws(ws).await?;
+    let provider = ProviderBuilder::new().on_ws(ws).await?;
     Ok((provider, anvil))
 }
 

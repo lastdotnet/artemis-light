@@ -12,7 +12,7 @@ futures = "0.3"
 tokio = { version = "1.44", features = ["full"] }
 tokio-stream = { version = "0.1", features = ['sync'] }
 jsonrpsee = { version = "0.24", features = ["client", "async-client"] }
-alloy = { git = "https://github.com/alloy-rs/alloy", tag = "v0.13.0", features = [
+alloy = { git = "https://github.com/alloy-rs/alloy", features = [
     "full",
     "node-bindings",
 ] }

@@ -8,7 +8,7 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 
 use alloy::{
-    network::TransactionBuilder, providers::Provider, rpc::types::eth::TransactionRequest,
+    network::{AnyNetwork, TransactionBuilder}, providers::Provider, rpc::types::eth::TransactionRequest, serde::WithOtherFields,
 };
 
 /// An executor that sends transactions to the mempool.
@@ -28,7 +28,7 @@ pub struct GasBidInfo {
 
 #[derive(Debug, Clone)]
 pub struct SubmitTxToMempool {
-    pub tx: TransactionRequest,
+    pub tx: WithOtherFields<TransactionRequest>,
     pub gas_bid_info: Option<GasBidInfo>,
 }
 
@@ -41,7 +41,7 @@ impl<M: Provider> MempoolExecutor<M> {
 #[async_trait]
 impl<M> Executor<SubmitTxToMempool> for MempoolExecutor<M>
 where
-    M: Provider,
+    M: Provider<AnyNetwork>,
 {
     /// Send a transaction to the mempool.
     async fn execute(&self, mut action: SubmitTxToMempool) -> Result<()> {

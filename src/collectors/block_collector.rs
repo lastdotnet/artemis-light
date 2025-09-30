@@ -34,7 +34,7 @@ impl<M> Collector<NewBlock> for BlockCollector<M>
 where
     M: Provider,
 {
-    async fn get_event_stream(&self) -> Result<CollectorStream<'_, NewBlock>> {
+    async fn subscribe(&self) -> Result<CollectorStream<'_, NewBlock>> {
         let stream = self.provider.subscribe_blocks().await?;
         let stream = stream.into_stream().map(|block| NewBlock {
             hash: block.hash,

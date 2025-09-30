@@ -1,12 +1,12 @@
-use alloy::{contract::Event, providers::Provider, rpc::types::Log};
+use alloy::rpc::types::Log;
 
-mod filter_map;
 mod enumerate;
+mod filter_map;
 mod map;
 mod merge;
 
-pub use filter_map::*;
 pub use enumerate::*;
+pub use filter_map::*;
 pub use map::*;
 pub use merge::*;
 
@@ -15,7 +15,7 @@ use crate::types::Collector;
 /// Extension trait that provides additional functionality for types implementing [`Collector`].
 ///
 /// This trait adds methods for transforming and combining collector streams:
-pub trait CollectorExt<E>: Collector<E> + Send + Sync + Sized + 'static {
+pub trait ArchiveCollectorExt<E>: Collector<E> + Send + Sync + Sized + 'static {
     /// Map events from type `E` to type `E2` using a function `f`.
     ///
     /// # Example
@@ -78,14 +78,6 @@ pub trait CollectorExt<E>: Collector<E> + Send + Sync + Sized + 'static {
         Merge::new(self, other)
     }
 
-    fn subscribe_from_archive<P: Provider>(
-        self,
-        archive_provider: P,
-        from: u64,
-    ) -> ArchiveCollectorImpl<Self, P> {
-        ArchiveCollectorImpl::new(self, archive_provider, from)
-    }
-
     fn enumerate<E2>(self) -> Enumerate<E2>
     where
         Self: Collector<Log> + Send + Sync + 'static,
@@ -94,24 +86,7 @@ pub trait CollectorExt<E>: Collector<E> + Send + Sync + Sized + 'static {
     }
 }
 
-pub struct ArchiveCollectorImpl<C, P> {
-    provider: P,
-    collector: C,
-    from: u64,
-}
-
-impl<C, P> ArchiveCollectorImpl<C, P> {
-    pub fn new(collector: C, archive_provider: P, from: u64) -> Self {
-        Self {
-            collector,
-            provider: archive_provider,
-            from,
-        }
-    }
-}
-
-impl<T: Collector<E> + 'static, E> CollectorExt<E> for T {}
-
+impl<T: Collector<E> + 'static, E> ArchiveCollectorExt<E> for T {}
 
 #[cfg(doctest)]
 pub mod doctest {
@@ -137,7 +112,7 @@ pub mod doctest {
 
 #[cfg(test)]
 mod test {
-    use super::CollectorExt;
+    use super::ArchiveCollectorExt;
     use crate::types::{Collector, CollectorStream};
     use alloy::{
         primitives::{Address, B256, Bytes, Log as PrimitivesLog, LogData},
@@ -147,7 +122,7 @@ mod test {
     use anyhow::Result;
     use async_trait::async_trait;
     use futures::stream;
-    use serde::{Deserialize, de::DeserializeOwned};
+    use serde::Deserialize;
     use tokio_stream::StreamExt;
     use tokio_stream::{self};
 

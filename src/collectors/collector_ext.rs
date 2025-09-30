@@ -1,4 +1,4 @@
-use alloy::{contract::Event, providers::Provider, rpc::types::Log};
+use alloy::{providers::Provider, rpc::types::Log};
 
 mod filter_map;
 mod enumerate;

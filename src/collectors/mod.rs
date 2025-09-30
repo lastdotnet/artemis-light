@@ -15,16 +15,14 @@ mod mempool_collector;
 mod event_collector;
 
 /// This module contains syntax extensions for the `Collector` trait.
-pub mod collector_ext;
+mod collector_ext;
 
-mod indexed_event_collector;
 
-pub mod archive_collector_ext;
-
-pub mod archive_collector;
+mod archive_collector;
 
 pub use block_collector::*;
 pub use event_collector::*;
 pub use log_collector::*;
 pub use mempool_collector::*;
-pub use indexed_event_collector::*;
+pub use archive_collector::*;
+pub use collector_ext::*;

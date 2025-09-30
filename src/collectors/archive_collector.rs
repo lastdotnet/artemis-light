@@ -1,6 +1,6 @@
 use std::marker::PhantomData;
 
-use crate::types::{Collector, CollectorStream, Offset};
+use crate::types::{Collector, CollectorStream};
 use alloy::{
     contract::Event, network::Ethereum, providers::Provider, rpc::types::Filter,
     sol_types::SolEvent,
@@ -14,6 +14,7 @@ pub struct ArchiveCollector<P, E> {
     provider: P,
     filter: Filter,
     chunk_size: u64,
+    from: u64,
     e: PhantomData<E>,
 }
 
@@ -22,13 +23,14 @@ where
     P: Provider,
     E: SolEvent + Send + Sync + Clone + 'a,
 {
-    pub fn new(event: Event<P, E>, chunk_size: u64) -> Self {
+    pub fn new(event: Event<P, E>, from: u64, chunk_size: u64) -> Self {
         let filter = event.filter;
         let provider = event.provider;
         Self {
             provider,
             filter,
             chunk_size,
+            from,
             e: PhantomData,
         }
     }
@@ -74,8 +76,14 @@ where
 {
     async fn subscribe(&self) -> Result<CollectorStream<'_, E>> {
         let event = Event::<&P, E, Ethereum>::new(&self.provider, self.filter.clone());
-        let stream = event.watch().await?.into_stream();
-        let stream = stream.filter_map(|el| el.map(|(e, _)| e).ok());
-        Ok(Box::pin(stream))
+        let to = self.provider.get_block_number().await?;
+        let load_stream = self.load(self.from, to).await?;
+        let subscription_stream = event
+            .watch()
+            .await?
+            .into_stream()
+            .filter_map(|el| el.map(|(e, _)| e).ok());
+
+        Ok(Box::pin(load_stream.chain(subscription_stream)))
     }
 }

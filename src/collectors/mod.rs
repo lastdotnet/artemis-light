@@ -21,6 +21,8 @@ mod indexed_event_collector;
 
 pub mod archive_collector_ext;
 
+pub mod archive_collector;
+
 pub use block_collector::*;
 pub use event_collector::*;
 pub use log_collector::*;

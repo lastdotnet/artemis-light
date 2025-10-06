@@ -9,7 +9,7 @@ use anyhow::{Ok, Result};
 use async_trait::async_trait;
 use futures::stream;
 use tokio_stream::StreamExt;
-
+use std::fmt::Debug;
 pub struct ArchiveCollector<P, E> {
     provider: P,
     filter: Filter,
@@ -18,10 +18,10 @@ pub struct ArchiveCollector<P, E> {
     e: PhantomData<E>,
 }
 
-impl<'a, P, E> ArchiveCollector<P, E>
+impl<P, E: Debug> ArchiveCollector<P, E>
 where
     P: Provider,
-    E: SolEvent + Send + Sync + Clone + 'a,
+    E: SolEvent + Send + Sync + Clone,
 {
     pub fn new(event: Event<P, E>, from: u64, chunk_size: u64) -> Self {
         let filter = event.filter;
@@ -35,7 +35,7 @@ where
         }
     }
 
-    pub async fn load(&self, from: u64, to: u64) -> Result<CollectorStream<'a, E>> {
+    pub async fn load(&self, from: u64, to: u64) -> Result<CollectorStream<'_, E>> {
         let mut events = vec![];
         let (_, chunk) = self.load_chunked(from, to).await?;
         events.extend(chunk);
@@ -49,7 +49,9 @@ where
 
         for offset in (from..to).step_by(self.chunk_size as usize) {
             let to = (from + self.chunk_size).min(to);
+            println!("Loading chunk from: {} to: {}", offset, to);
             let chunk = self.load_chunk(offset, to).await?;
+            println!("#Chunks: {:?}", chunk.len());
             last_offset = to;
             events.extend(chunk);
         }
@@ -69,14 +71,17 @@ where
 
 /// Implementation of the [Collector](Collector) trait for the [EventCollector](EventCollector).
 #[async_trait]
-impl<'a, P, E> Collector<E> for ArchiveCollector<P, E>
+impl<P, E> Collector<E> for ArchiveCollector<P, E>
 where
     P: Provider,
-    E: SolEvent + Send + Sync + Clone + 'a,
+    E: SolEvent + Send + Sync + Clone + Debug,
 {
     async fn subscribe(&self) -> Result<CollectorStream<'_, E>> {
         let event = Event::<&P, E, Ethereum>::new(&self.provider, self.filter.clone());
         let to = self.provider.get_block_number().await?;
+
+        println!("To: {}", to);
+        
         let load_stream = self.load(self.from, to).await?;
         let subscription_stream = event
             .watch()
@@ -84,6 +89,6 @@ where
             .into_stream()
             .filter_map(|el| el.map(|(e, _)| e).ok());
 
-        Ok(Box::pin(load_stream.chain(subscription_stream)))
+        Ok(Box::pin(subscription_stream))
     }
 }

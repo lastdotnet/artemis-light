@@ -30,8 +30,8 @@ impl<E, A> Engine<E, A> {
             collectors: vec![],
             strategies: vec![],
             executors: vec![],
-            event_channel_capacity: 1024,
-            action_channel_capacity: 1024,
+            event_channel_capacity: 512,
+            action_channel_capacity: 512,
         }
     }
 

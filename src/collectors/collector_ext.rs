@@ -1,16 +1,20 @@
-use alloy::{providers::Provider, rpc::types::Log};
+use crate::types::{Archive, Collector, Storage};
 
 mod enumerate;
 mod filter_map;
+mod indexed_with;
+mod load_from;
 mod map;
 mod merge;
+mod persist;
 
 pub use enumerate::*;
 pub use filter_map::*;
+pub use indexed_with::*;
+pub use load_from::*;
 pub use map::*;
 pub use merge::*;
-
-use crate::types::Collector;
+pub use persist::*;
 
 /// Extension trait that provides additional functionality for types implementing [`Collector`].
 ///
@@ -78,35 +82,19 @@ pub trait CollectorExt<E>: Collector<E> + Send + Sync + Sized + 'static {
         Merge::new(self, other)
     }
 
-    fn subscribe_from_archive<P: Provider>(
-        self,
-        archive_provider: P,
-        from: u64,
-    ) -> ArchiveCollectorImpl<Self, P> {
-        ArchiveCollectorImpl::new(self, archive_provider, from)
+    fn enumerate(self) -> Enumerate<E, Self> {
+        Enumerate::new(self)
     }
 
-    fn enumerate<E2>(self) -> Enumerate<E2>
+    fn persist<S>(self, storage: S) -> Persist<Self, S>
     where
-        Self: Collector<Log> + Send + Sync + 'static,
+        S: Storage<E>,
     {
-        Enumerate::new(Box::new(self))
+        Persist::new(self, storage, false)
     }
-}
 
-pub struct ArchiveCollectorImpl<C, P> {
-    provider: P,
-    collector: C,
-    from: u64,
-}
-
-impl<C, P> ArchiveCollectorImpl<C, P> {
-    pub fn new(collector: C, archive_provider: P, from: u64) -> Self {
-        Self {
-            collector,
-            provider: archive_provider,
-            from,
-        }
+    fn load_from(self, n: u64) -> LoadFrom<Self> {
+        LoadFrom::new(self, n)
     }
 }
 
@@ -140,37 +128,32 @@ mod test {
 
     use super::CollectorExt;
     use crate::{
-        collectors::{ArchiveCollector, BlockCollector, EventCollector},
-        types::{Collector, CollectorStream},
+        collectors::{ArchiveCollector, BlockCollector, WithIndex, collector_ext::Archive},
+        types::{Collector, CollectorStream, Storage},
     };
     use alloy::{
-        contract::Event,
-        network::{Ethereum, Network},
-        primitives::{Address, B256, BlockNumber, Bytes, Log as PrimitivesLog, LogData, U64, U256},
-        providers::{FilterPollerBuilder, Provider, ProviderBuilder, ProviderCall, RootProvider},
-        rpc::{
-            client::{ClientRef, NoParams, PollerBuilder},
-            types::{Filter, FilterBlockOption, Log},
-        },
+        network::Ethereum,
+        primitives::{Address, B256, Bytes, Log as PrimitivesLog, LogData},
+        providers::{Provider, ProviderBuilder, RootProvider},
+        rpc::types::Log,
         sol,
         sol_types::SolEvent,
-        transports::TransportResult,
     };
     use anyhow::Result;
     use async_trait::async_trait;
     use futures::stream;
-    use serde::{Deserialize, de::DeserializeOwned};
+    use serde::Deserialize;
     use tokio::sync::Mutex;
-    use tokio_stream::StreamExt;
-    use tokio_stream::{self};
+    use tokio_stream::{self, StreamExt as _};
 
     pub struct TestCollector {
+        archive: Vec<u8>,
         data: Vec<u8>,
     }
 
     impl TestCollector {
-        pub fn new(data: Vec<u8>) -> Self {
-            Self { data }
+        pub fn new(archive: Vec<u8>, data: Vec<u8>) -> Self {
+            Self { archive, data }
         }
     }
 
@@ -179,6 +162,14 @@ mod test {
     impl Collector<u8> for TestCollector {
         async fn subscribe(&self) -> Result<CollectorStream<'_, u8>> {
             Ok(Box::pin(stream::iter(self.data.clone())))
+        }
+    }
+
+    #[async_trait]
+    impl Archive<u8> for TestCollector {
+        async fn replay_from(&self, n: u64) -> Result<CollectorStream<'_, u8>> {
+            let data = self.archive[n as usize..].to_vec();
+            Ok(Box::pin(stream::iter(data)))
         }
     }
 
@@ -201,19 +192,22 @@ mod test {
         }
     }
 
-    pub struct LogCollector {
-        data: Vec<Log>,
+    pub struct TestEventCollector<E> {
+        data: Vec<(E, Log)>,
     }
-    impl LogCollector {
-        pub fn new(data: Vec<u64>) -> Self {
-            let data = data.into_iter().map(make_log).collect();
+    impl TestEventCollector<TestEvent> {
+        pub fn new(data: Vec<u8>) -> Self {
+            let data = data
+                .into_iter()
+                .map(|e| (TestEvent::new(e), make_log(e as u64)))
+                .collect();
             Self { data }
         }
     }
 
     #[async_trait]
-    impl Collector<Log> for LogCollector {
-        async fn subscribe(&self) -> Result<CollectorStream<'_, Log>> {
+    impl<E: SolEvent + Send + Sync + Clone> Collector<(E, Log)> for TestEventCollector<E> {
+        async fn subscribe(&self) -> Result<CollectorStream<'_, (E, Log)>> {
             Ok(Box::pin(stream::iter(self.data.clone())))
         }
     }
@@ -266,23 +260,58 @@ mod test {
         }
     }
 
-    pub struct TestArchiveCollector {
-        history: Vec<TestEvent>,
-        data: Vec<TestEvent>,
-        from: u64,
+    #[derive(Clone)]
+    pub struct TestStorage<E> {
+        pub data: Arc<Mutex<Vec<E>>>,
     }
 
-    impl TestArchiveCollector {
-        pub fn new(history: Vec<u8>, data: Vec<u8>, from: u64) -> Self {
+    impl<E> TestStorage<E> {
+        pub fn new() -> Self {
             Self {
-                history: history.into_iter().map(TestEvent::new).collect(),
-                data: data.into_iter().map(TestEvent::new).collect(),
-                from,
+                data: Arc::new(Mutex::new(vec![])),
+            }
+        }
+
+        pub fn with_data(data: Vec<E>) -> Self {
+            Self {
+                data: Arc::new(Mutex::new(data)),
             }
         }
     }
 
-    fn text_provider() -> impl Provider {
+    #[async_trait]
+    impl<E> Storage<E> for TestStorage<E>
+    where
+        E: Send + Sync + Clone,
+    {
+        async fn write(&self, event: &E) -> anyhow::Result<E> {
+            println!("Write event");
+            let mut data = self.data.lock().await;
+            data.push(event.clone());
+            Ok(event.clone())
+        }
+        async fn replay_from(&self, n: u64) -> anyhow::Result<CollectorStream<'_, E>> {
+            let data = self.data.lock().await;
+
+            if n >= data.len() as u64 {
+                return Ok(Box::pin(stream::iter(vec![])));
+            }
+            let data = data[n as usize..].to_vec();
+            let stream = tokio_stream::iter(data);
+            Ok(Box::pin(stream) as CollectorStream<'_, E>)
+        }
+        async fn head(&self) -> anyhow::Result<u64> {
+            let data = self.data.lock().await;
+            let enumerated = data.iter().enumerate().collect::<Vec<_>>();
+            let head = enumerated
+                .last()
+                .and_then(|(i, _)| Some(*i as u64))
+                .unwrap_or(0);
+            Ok(head)
+        }
+    }
+
+    fn _text_provider() -> impl Provider {
         RootProvider::<Ethereum>::builder()
             .with_recommended_fillers()
             .connect_anvil()
@@ -320,14 +349,13 @@ mod test {
             .connect_anvil_with_wallet_and_config(|config| config.block_time_f64(0.1))
             .unwrap();
         let provider = Arc::new(provider);
-
         let contract = Arc::new(TestContract::deploy(Arc::clone(&provider)).await.unwrap());
-        let mut n: u64 = 0;
         let block_collector = BlockCollector::new(Arc::clone(&provider));
-
         let mut block_stream = block_collector.subscribe().await.unwrap();
+
         // Emit the first 5 events
         let mut stage1_block_number = 0;
+        let mut n: u64 = 0;
         let clone_contract = Arc::clone(&contract);
         while let Some(block) = block_stream.next().await {
             if n > 5 {
@@ -342,13 +370,12 @@ mod test {
         // Continue to emit events every 100ms
         let writer_handle = tokio::spawn(async move {
             loop {
-                println!("Writing event: {:?}", n);
-                if n >= 20 {
+                if n > 20 {
                     break;
                 }
                 let _ = clone_contract.test(n).send().await.unwrap();
                 n += 1;
-                tokio::time::sleep(Duration::from_millis(100)).await;  
+                tokio::time::sleep(Duration::from_millis(100)).await;
             }
         });
 
@@ -358,15 +385,14 @@ mod test {
         let clone_contract = Arc::clone(&contract);
         let reader_handle = tokio::spawn(async move {
             let mut ids = ids_clone.lock().await;
-            let filter = clone_contract.TestEvent_filter(); 
+            let filter = clone_contract.TestEvent_filter();
             let archive_collector = ArchiveCollector::new(filter, 0, 100);
             let mut archive_stream = archive_collector.subscribe().await.unwrap();
             while let Some(event) = archive_stream.next().await {
-                println!("Event: {:?}", event);
                 ids.push(event.n);
-                // if event.n >= 10 {
-                //     break;
-                // }
+                if event.n >= 20 {
+                    break;
+                }
             }
         });
 
@@ -374,8 +400,14 @@ mod test {
             _ = writer_handle => {},
             _ = reader_handle => {},
         };
-
-        println!("Ids: {:?}", Arc::clone(&ids).lock().await);
+        
+        let ids = ids.lock().await;
+        assert_eq!(
+            ids.clone(),
+            vec![
+                0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20
+            ]
+        );
 
         // let events = collector.collect::<Vec<_>>().await;
         // println!("Event: {:?}", events);
@@ -387,12 +419,18 @@ mod test {
         // assert_eq!(event, vec![1, 2, 3, 4, 5, 6]);
     }
 
+    impl WithIndex for u8 {
+        type Index = u8;
+        fn index(&self) -> Self::Index {
+            *self
+        }
+    }
+
     #[tokio::test]
     async fn test_collector_enumerate() {
         let indices = vec![1, 2, 3];
-        let collector = LogCollector::new(indices.clone());
-
-        let enumerated = collector.enumerate::<TestEvent>();
+        let collector = TestCollector::new(vec![], indices.clone());
+        let enumerated = collector.enumerate();
         let stream = enumerated.subscribe().await.unwrap();
         let event = stream.map(|(i, _)| i).collect::<Vec<_>>().await;
         assert_eq!(event, indices);
@@ -400,9 +438,7 @@ mod test {
 
     #[tokio::test]
     async fn test_collector_map() {
-        let collector = TestCollector {
-            data: vec![1, 2, 3],
-        };
+        let collector = TestCollector::new(vec![], vec![1, 2, 3]);
         let collector = collector.map(|n| n + 1);
         let stream = collector.subscribe().await.unwrap();
         let event = stream.collect::<Vec<_>>().await;
@@ -410,10 +446,8 @@ mod test {
     }
 
     #[tokio::test]
-    async fn test_filter_collector_map() {
-        let collector = TestCollector {
-            data: vec![1, 2, 3, 4],
-        };
+    async fn test_collector_filter_map() {
+        let collector = TestCollector::new(vec![], vec![1, 2, 3, 4]);
         let collector = collector.filter_map(|n| if n % 2 == 0 { Some(n) } else { None });
         let stream = collector.subscribe().await.unwrap();
         let event = stream.collect::<Vec<_>>().await;
@@ -421,10 +455,10 @@ mod test {
     }
 
     #[tokio::test]
-    async fn test_vec_merge_collector() {
-        let block_collector = TestCollector::new(vec![1, 3, 5]);
-        let block_collector_2 = TestCollector::new(vec![2, 4, 6]);
-        let block_collector_3 = TestCollector::new(vec![7]);
+    async fn test_collector_vec_merge() {
+        let block_collector = TestCollector::new(vec![], vec![1, 3, 5]);
+        let block_collector_2 = TestCollector::new(vec![], vec![2, 4, 6]);
+        let block_collector_3 = TestCollector::new(vec![], vec![7]);
 
         let collectors = vec![
             Box::new(block_collector),
@@ -443,9 +477,9 @@ mod test {
     }
 
     #[tokio::test]
-    async fn test_merge_collector() {
-        let block_collector = TestCollector::new(vec![1, 3, 5]);
-        let block_collector_2 = TestCollector::new(vec![2, 4, 6]);
+    async fn test_collector_merge() {
+        let block_collector = TestCollector::new(vec![], vec![1, 3, 5]);
+        let block_collector_2 = TestCollector::new(vec![], vec![2, 4, 6]);
         let merged = block_collector.merge(block_collector_2);
         let stream = merged.subscribe().await.unwrap();
         let mut res = stream.collect::<Vec<_>>().await;
@@ -455,14 +489,82 @@ mod test {
 
     #[tokio::test]
     async fn test_collector_map_filter_merge() {
-        let collector = TestCollector::new(vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+        let collector = TestCollector::new(vec![], vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
         let collector = collector
-            .map(|n| n + 1)
-            .filter_map(|n| if n % 2 == 0 { Some(n) } else { None })
-            .merge(TestCollector::new(vec![11, 12, 13, 14, 15]));
+            .map(|a| a + 1)
+            .filter_map(|a| if a % 2 == 0 { Some(a) } else { None })
+            .merge(TestCollector::new(vec![], vec![11, 12, 13, 14, 15]));
         let stream = collector.subscribe().await.unwrap();
         let mut res = stream.collect::<Vec<_>>().await;
         res.sort();
         assert_eq!(res, vec![2, 4, 6, 8, 10, 11, 12, 13, 14, 15]);
     }
+
+    #[tokio::test]
+    async fn test_collector_archive() {
+        let collector = TestCollector::new(vec![1, 2, 3], vec![4, 5, 6]);
+        let collector = collector.load_from(2);
+        let stream = collector.subscribe().await.unwrap();
+        let res = stream.collect::<Vec<_>>().await;
+        assert_eq!(res, vec![3, 4, 5, 6]);
+    }
+
+    #[tokio::test]
+    async fn test_collector_storage() {
+        let storage = TestStorage::<u8>::new();
+        let collector = TestCollector::new(vec![1, 2, 3], vec![4, 5, 6]);
+        let collector = collector.persist(storage.clone());
+        let stream = collector.subscribe().await.unwrap();
+        let data = stream.map(|e| e).collect::<Vec<_>>().await;
+        let stored = storage.data.lock().await.clone();
+        let stored = stored.into_iter().collect::<Vec<_>>();
+        assert_eq!(data, stored);
+        assert_eq!(data, vec![4, 5, 6]);
+    }
+
+    #[tokio::test]
+    async fn test_collector_from_storage_scenario_1() {
+        let storage = TestStorage::<u8>::with_data(vec![0, 1, 2, 3, 4]);
+        let collector = TestCollector::new(vec![0, 1, 2, 3, 4], vec![5, 6, 7, 8, 9]);
+        let collector = collector.persist(storage.clone()).load_from(2);
+        let res = collector
+            .subscribe()
+            .await
+            .unwrap()
+            .collect::<Vec<_>>()
+            .await;
+        let stored = storage.data.lock().await.clone();
+        assert_eq!(res, vec![2, 3, 4, 5, 6, 7, 8, 9]);
+        assert_eq!(stored, vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    }
+
+    #[tokio::test]
+    async fn test_collector_from_storage_scenario_2() {
+        let storage = TestStorage::<u8>::with_data(vec![0, 1, 2, 3, 4]);
+        let collector = TestCollector::new(vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9], vec![10]);
+        let collector = collector.persist(storage.clone()).load_from(6);
+        let res = collector
+            .subscribe()
+            .await
+            .unwrap()
+            .collect::<Vec<_>>()
+            .await;
+        let stored = storage.data.lock().await.clone();
+        assert_eq!(res, vec![6, 7, 8, 9, 10]);
+        assert_eq!(stored, vec![0, 1, 2, 3, 4, 6, 7, 8, 9, 10]);
+    }
+
+    // #[tokio::test]
+    // async fn test_collector_enumerate_storage() {
+    //     let storage = TestStorage::new();
+    //     let collector = TestCollector::new(vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10]); // (E, Log)
+    //     let enumerated = collector.enumerate();
+    //     let archive = enumerated.from(0); // (Option<u64>, E, Log)
+    //     let collector = collector.storage(storage.clone());
+    //     let stream = collector.subscribe().await.unwrap();
+    //     let data = stream.map(|(e, _)| e).collect::<Vec<_>>().await;
+    //     let stored = storage.data.lock().await.clone();
+    //     let stored = stored.into_iter().map(|(_, e, _)| e).collect::<Vec<_>>();
+    //     assert_eq!(stored, data);
+    // }
 }

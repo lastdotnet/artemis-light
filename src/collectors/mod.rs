@@ -17,12 +17,13 @@ mod event_collector;
 /// This module contains syntax extensions for the `Collector` trait.
 mod collector_ext;
 
-
 mod archive_collector;
 
+#[cfg(test)]
+pub use archive_collector::*;
 pub use block_collector::*;
 pub use event_collector::*;
 pub use log_collector::*;
 pub use mempool_collector::*;
-pub use archive_collector::*;
+
 pub use collector_ext::*;

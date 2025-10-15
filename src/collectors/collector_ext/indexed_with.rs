@@ -6,12 +6,12 @@ use async_trait::async_trait;
 use std::marker::PhantomData;
 use tokio_stream::StreamExt;
 
-pub trait WithIndex {
+pub trait Indexed {
     type Index;
     fn index(&self) -> Self::Index;
 }
 
-impl WithIndex for Log {
+impl Indexed for Log {
     type Index = Option<u64>;
 
     fn index(&self) -> Self::Index {
@@ -19,7 +19,7 @@ impl WithIndex for Log {
     }
 }
 
-impl<E> WithIndex for (E, Log) {
+impl<E> Indexed for (E, Log) {
     type Index = Option<u64>;
 
     fn index(&self) -> Self::Index {
@@ -27,12 +27,12 @@ impl<E> WithIndex for (E, Log) {
     }
 }
 
-pub struct Enumerate<E, C> {
+pub struct IndexedWith<E, C> {
     collector: C,
     e: PhantomData<E>,
 }
 
-impl<E, C> Enumerate<E, C> {
+impl<E, C> IndexedWith<E, C> {
     pub fn new(collector: C) -> Self {
         Self {
             collector,
@@ -42,9 +42,9 @@ impl<E, C> Enumerate<E, C> {
 }
 
 #[async_trait]
-impl<E, C, I> Collector<(I, E)> for Enumerate<E, C>
+impl<E, C, I> Collector<(I, E)> for IndexedWith<E, C>
 where
-    E: Send + Sync + WithIndex<Index = I>,
+    E: Send + Sync + Indexed<Index = I>,
     C: Collector<E>,
     I: Send + Sync + 'static,
 {
@@ -59,10 +59,10 @@ where
 }
 
 #[async_trait]
-impl<E, C, I> Archive<(I, E)> for Enumerate<E, C>
+impl<E, C, I> Archive<(I, E)> for IndexedWith<E, C>
 where
     C: Archive<(I, E)> + 'static,
-    E: Send + Sync + WithIndex + 'static,
+    E: Send + Sync + Indexed + 'static,
 {
     async fn replay_from(&self, n: u64) -> anyhow::Result<CollectorStream<'_, (I, E)>> {
         self.collector.replay_from(n).await

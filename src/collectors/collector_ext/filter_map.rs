@@ -1,9 +1,8 @@
-
 use crate::types::{Collector, CollectorStream};
 use anyhow::Result;
 use async_trait::async_trait;
-use jsonrpsee::core::DeserializeOwned;
 use futures::StreamExt;
+use jsonrpsee::core::DeserializeOwned;
 
 /// FilterCollectorMap is a wrapper around a [Collector] that maps outgoing
 /// events to a different type.

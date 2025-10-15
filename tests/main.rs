@@ -34,7 +34,7 @@ async fn test_block_collector_sends_blocks() {
     let provider = Arc::new(provider);
     let block_collector = BlockCollector::new(provider.clone());
 
-    let block_stream = block_collector.get_event_stream().await.unwrap();
+    let block_stream = block_collector.subscribe().await.unwrap();
     let block_a = block_stream.into_future().await.0.unwrap();
     let block_b = provider
         .get_block(BlockId::Number(BlockNumberOrTag::Latest))
@@ -51,7 +51,7 @@ async fn test_mempool_collector_sends_txs() {
     let provider = Arc::new(provider);
     let mempool_collector = MempoolCollector::new(provider.clone());
     let mempool_stream = mempool_collector
-        .get_event_stream()
+        .subscribe()
         .await
         .expect("Failed to get mempool stream");
 

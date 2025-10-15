@@ -1,6 +1,0 @@
-CREATE TABLE IF NOT EXISTS events
-(
-    id INTEGER PRIMARY KEY NOT NULL,
-    event JSONB NOT NULL,
-    block_number INTEGER NOT NULL
-);

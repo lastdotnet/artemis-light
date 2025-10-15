@@ -4,8 +4,6 @@ use alloy::eips::BlockNumberOrTag;
 use alloy::rpc::types::Transaction;
 use anyhow::Result;
 use async_trait::async_trait;
-use futures::StreamExt;
-use jsonrpsee::core::DeserializeOwned;
 use std::pin::Pin;
 use tokio_stream::Stream;
 
@@ -44,12 +42,18 @@ impl TryFrom<Offset> for u64 {
 #[async_trait]
 pub trait Collector<E>: Send + Sync {
     /// Returns the core event stream for the collector.
+
+    async fn subscribe(&self) -> Result<CollectorStream<'_, E>>;
+
     #[deprecated(since = "0.1.0", note = "Use subscribe instead")]
     async fn get_event_stream(&self) -> Result<CollectorStream<'_, E>> {
         self.subscribe().await
     }
+}
 
-    async fn subscribe(&self) -> Result<CollectorStream<'_, E>>;
+#[async_trait]
+pub trait Archive<E>: Send + Sync {
+    async fn replay_from(&self, n: u64) -> anyhow::Result<CollectorStream<'_, E>>;
 }
 
 #[async_trait]
@@ -75,60 +79,12 @@ pub trait Executor<A>: Send + Sync {
     async fn execute(&self, action: A) -> Result<()>;
 }
 
-pub trait Persistence<E> {
-    fn persist(
-        &self,
-        event: E,
-        block_number: i32,
-    ) -> impl std::future::Future<Output = Result<E>> + Send;
-    fn replay_all(
-        &self,
-    ) -> impl std::future::Future<Output = Result<CollectorStream<'_, E>>> + Send {
-        self.replay_from(0)
-    }
-    fn replay_from(
-        &self,
-        n: usize,
-    ) -> impl std::future::Future<Output = Result<CollectorStream<'_, E>>> + Send;
-}
-pub struct PersistentCollector<C, S> {
-    collector: C,
-    storage: S,
-    offset: usize,
-}
-
-impl<C, S> PersistentCollector<C, S> {
-    pub fn new(collector: C, storage: S, offset: Option<usize>) -> Self {
-        Self {
-            collector,
-            storage,
-            offset: offset.unwrap_or_default(),
-        }
-    }
-}
-
 #[async_trait]
-impl<C, S, E> Collector<E> for PersistentCollector<C, S>
-where
-    S: Persistence<E> + Send + Sync,
-    E: Send + DeserializeOwned + 'static + Sync,
-    C: Collector<(E, u64)> + Send + Sync + 'static,
-{
-    async fn subscribe(&self) -> Result<CollectorStream<'_, E>> {
-        let persisted_event_stream = self.storage.replay_from(self.offset).await?;
-        let event_stream = self.collector.subscribe().await?;
-        let event_stream = Box::pin(event_stream.filter_map(
-            move |(event, block_number)| async move {
-                let res = self.storage.persist(event, block_number as i32).await.ok();
-                res
-            },
-        )) as CollectorStream<'_, E>;
-        let chained =
-            Box::pin(persisted_event_stream.chain(event_stream)) as CollectorStream<'_, E>;
-        Ok(chained)
-    }
+pub trait Storage<E> {
+    async fn write(&self, record: &E) -> anyhow::Result<E>;
+    async fn replay_from(&self, n: u64) -> anyhow::Result<CollectorStream<'_, E>>;
+    async fn head(&self) -> anyhow::Result<u64>;
 }
-
 /// ExecutorMap is a wrapper around an [Executor] that maps incoming
 /// actions to a different type.
 pub struct ExecutorMap<A, F> {

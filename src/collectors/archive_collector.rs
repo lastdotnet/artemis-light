@@ -1,6 +1,6 @@
-use std::marker::PhantomData;
+use std::{marker::PhantomData, sync::Arc};
 
-use crate::types::{Collector, CollectorStream};
+use crate::types::{Archive, Collector, CollectorStream};
 use alloy::{
     contract::Event, network::Ethereum, providers::Provider, rpc::types::Filter,
     sol_types::SolEvent,
@@ -8,14 +8,19 @@ use alloy::{
 use anyhow::{Ok, Result};
 use async_trait::async_trait;
 use futures::stream;
-use tokio_stream::StreamExt;
 use std::fmt::Debug;
+use tokio_stream::StreamExt;
 pub struct ArchiveCollector<P, E> {
-    provider: P,
+    provider: Arc<P>,
     filter: Filter,
     chunk_size: u64,
     from: u64,
     e: PhantomData<E>,
+}
+
+pub trait EventType<E, P> {
+    type Event: SolEvent;
+    type Provider: Provider;
 }
 
 impl<P, E: Debug> ArchiveCollector<P, E>
@@ -25,7 +30,7 @@ where
 {
     pub fn new(event: Event<P, E>, from: u64, chunk_size: u64) -> Self {
         let filter = event.filter;
-        let provider = event.provider;
+        let provider = Arc::new(event.provider);
         Self {
             provider,
             filter,
@@ -78,17 +83,38 @@ where
 {
     async fn subscribe(&self) -> Result<CollectorStream<'_, E>> {
         let event = Event::<&P, E, Ethereum>::new(&self.provider, self.filter.clone());
-        let to = self.provider.get_block_number().await?;
-
-        println!("To: {}", to);
-        
-        let load_stream = self.load(self.from, to).await?;
-        let subscription_stream = event
+        let stream = event
             .watch()
             .await?
             .into_stream()
             .filter_map(|el| el.map(|(e, _)| e).ok());
-
-        Ok(Box::pin(subscription_stream))
+        Ok(Box::pin(stream))
     }
 }
+
+#[async_trait]
+impl<P, E> Archive<E> for ArchiveCollector<P, E>
+where
+    P: Provider,
+    E: SolEvent + Send + Sync + Clone + Debug,
+{
+    async fn replay_from(&self, n: u64) -> Result<CollectorStream<'_, E>> {
+        let provider = Arc::clone(&self.provider);
+        let to = provider.get_block_number().await?;
+        let historical = self.load(n, to).await?;
+        Ok(Box::pin(historical))
+    }
+}
+
+// trait Foo<E>: Archive<E> + Collector<E> {}
+
+// impl<E, T> Foo<E> for T where T: Archive<E> + Collector<E> {
+
+// }
+
+// fn bar<E, C: Archive<E>>(c: C) {}
+// fn baz<E, C: Foo<E>>(c: C) {
+//     foo(c);
+// }
+
+// impl<T, E> Collector<E> for T where T: Archive<E> {}

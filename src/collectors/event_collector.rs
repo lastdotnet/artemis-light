@@ -1,5 +1,5 @@
 use crate::types::{Collector, CollectorStream};
-use alloy::{contract::Event, providers::Provider, sol_types::SolEvent};
+use alloy::{contract::Event, providers::Provider, rpc::types::Log, sol_types::SolEvent};
 use anyhow::Result;
 use async_trait::async_trait;
 use tokio_stream::StreamExt;
@@ -18,14 +18,14 @@ impl<P, E> EventCollector<P, E> {
 
 /// Implementation of the [Collector](Collector) trait for the [EventCollector](EventCollector).
 #[async_trait]
-impl<P, E> Collector<E> for EventCollector<P, E>
+impl<P, E> Collector<(E, Log)> for EventCollector<P, E>
 where
     P: Provider,
     E: SolEvent + Send + Sync,
 {
-    async fn subscribe(&self) -> Result<CollectorStream<'_, E>> {
+    async fn subscribe(&self) -> Result<CollectorStream<'_, (E, Log)>> {
         let stream = self.event.watch().await?.into_stream();
-        let stream = stream.filter_map(|el| el.map(|(e, _)| e).ok());
+        let stream = stream.filter_map(|el| el.ok());
         Ok(Box::pin(stream))
     }
 }

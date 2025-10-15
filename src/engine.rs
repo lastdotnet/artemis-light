@@ -127,7 +127,7 @@ where
             let event_sender = event_sender.clone();
             set.spawn(async move {
                 info!("starting collector... ");
-                let mut event_stream = collector.get_event_stream().await.unwrap();
+                let mut event_stream = collector.subscribe().await.unwrap();
                 while let Some(event) = event_stream.next().await {
                     match event_sender.send(event) {
                         Ok(_) => {}

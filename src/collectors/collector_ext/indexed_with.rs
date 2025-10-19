@@ -64,7 +64,7 @@ where
     C: Archive<(I, E)> + 'static,
     E: Send + Sync + Indexed + 'static,
 {
-    async fn replay_from(&self, n: u64) -> anyhow::Result<CollectorStream<'_, (I, E)>> {
-        self.collector.replay_from(n).await
+    async fn replay_from(&self, n: u64, chunk_size: Option<u64>) -> anyhow::Result<CollectorStream<'_, (I, E)>> {
+        self.collector.replay_from(n, chunk_size).await
     }
 }

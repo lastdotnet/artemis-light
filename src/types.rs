@@ -1,7 +1,5 @@
-use crate::collectors::NewBlock;
 use crate::executors::mempool_executor::SubmitTxToMempool;
 use alloy::eips::BlockNumberOrTag;
-use alloy::rpc::types::Transaction;
 use anyhow::Result;
 use async_trait::async_trait;
 use std::pin::Pin;
@@ -53,12 +51,7 @@ pub trait Collector<E>: Send + Sync {
 
 #[async_trait]
 pub trait Archive<E>: Send + Sync {
-    async fn replay_from(&self, n: u64) -> anyhow::Result<CollectorStream<'_, E>>;
-}
-
-#[async_trait]
-pub trait ArchiveCollector<E>: Send + Sync {
-    async fn subscribe_from(&self, from: u64) -> Result<CollectorStream<'_, E>>;
+    async fn replay_from(&self, n: u64, chunk_size: Option<u64>) -> Result<CollectorStream<'_, E>>;
 }
 
 /// Strategy trait, which defines the core logic for each opportunity.
@@ -111,12 +104,6 @@ where
             None => Ok(()),
         }
     }
-}
-
-/// Convenience enum containing all the events that can be emitted by collectors.
-pub enum Events {
-    NewBlock(NewBlock),
-    Transaction(Box<Transaction>),
 }
 
 /// Convenience enum containing all the actions that can be executed by executors.

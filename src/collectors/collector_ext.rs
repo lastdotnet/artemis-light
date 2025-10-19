@@ -1,6 +1,6 @@
 use crate::types::{Archive, Collector, Storage};
 
-mod enumerate;
+mod enumerate_with;
 mod filter_map;
 mod indexed_with;
 mod load_from;
@@ -8,7 +8,7 @@ mod map;
 mod merge;
 mod persist;
 
-pub use enumerate::*;
+pub use enumerate_with::*;
 pub use filter_map::*;
 pub use indexed_with::*;
 pub use load_from::*;
@@ -82,10 +82,64 @@ pub trait CollectorExt<E>: Collector<E> + Send + Sync + Sized + 'static {
         Merge::new(self, other)
     }
 
-    fn enumerate(self) -> Enumerate<E, Self> {
-        Enumerate::new(self)
+    /// Enumerate events with a custom index function.
+    ///
+    /// This method transforms each event by pairing it with an index value computed
+    /// by the provided function `f`. The resulting collector yields tuples of `(I, E)`
+    /// where `I` is the index type and `E` is the original event type.
+    ///
+    /// # Parameters
+    ///
+    /// * `f` - A function that takes a reference to an event and returns an index value
+    ///
+    /// # Type Parameters
+    ///
+    /// * `F` - The function type that maps from `&E` to `I`
+    /// * `I` - The index type returned by the function
+    ///
+    /// # Returns
+    ///
+    /// Returns an `EnumerateWith` collector that yields `(I, E)` tuples.
+    ///
+    /// # Example
+    ///
+    /// ```no-run
+    /// # tokio_test::block_on(async {
+    /// let collector = TestCollector::new(vec![1, 2, 3]);
+    /// let enumerated = collector.enumerate_with(|n| n * 2); // Use double as index
+    /// let res = enumerated.get_event_stream().await.unwrap().collect::<Vec<_>>().await;
+    /// assert_eq!(res, vec![(2, 1), (4, 2), (6, 3)]);
+    /// # })
+    /// ```
+    ///
+    /// # Use Cases
+    ///
+    /// - Adding sequence numbers to events
+    /// - Creating custom indexing schemes
+    /// - Pairing events with computed metadata
+    /// - Preparing data for ordered processing
+    fn enumerate_with<F, I>(self, f: F) -> EnumerateWith<E, F, Self>
+    where
+        F: Fn(&E) -> I,
+    {
+        EnumerateWith::new(self, f)
     }
 
+    /// Transparently persist events to the give storage.
+    ///
+    /// # Example
+    ///
+    /// ```no-run
+    /// # tokio_test::block_on(async {
+    /// let collector = TestCollector::new(vec![1, 2, 3]);
+    /// let storage = TestStorage::new();
+    /// let peristed = collector.persist(storage);
+    /// let mut res = merperisted.get_event_stream().await.unwrap().collect::<Vec<_>>().await;
+    /// let stored = storage.data.lock().await.clone();
+    /// assert_eq!(res, stored);
+    /// # })
+    /// ```
+    ///
     fn persist<S>(self, storage: S) -> Persist<Self, S>
     where
         S: Storage<E>,
@@ -93,8 +147,28 @@ pub trait CollectorExt<E>: Collector<E> + Send + Sync + Sized + 'static {
         Persist::new(self, storage, false)
     }
 
-    fn load_from(self, n: u64) -> LoadFrom<Self> {
-        LoadFrom::new(self, n)
+    /// Load from archive starting with block number n.
+    /// Calling subscribe will return a stream that contains events from the archive and a subscription to the live stream.
+    /// Arguments:
+    ///
+    /// - n: The block number to start loading from.
+    /// - chunk_size: The chunk size to load the archive in.
+    ///
+    /// # Example
+    ///
+    /// ```no-run
+    /// # tokio_test::block_on(async {
+    /// let collector = TestCollector::new(vec![1, 2, 3]);
+    /// let storage = TestStorage::new();
+    /// let peristed = collector.persist(storage);
+    /// let mut res = merperisted.get_event_stream().await.unwrap().collect::<Vec<_>>().await;
+    /// let stored = storage.data.lock().await.clone();
+    /// assert_eq!(res, stored);
+    /// # })
+    /// ```
+    ///
+    fn load_from(self, n: u64, chunk_size: Option<u64>) -> LoadFrom<Self> {
+        LoadFrom::new(self.into(), n, chunk_size)
     }
 }
 
@@ -128,21 +202,16 @@ mod test {
 
     use super::CollectorExt;
     use crate::{
-        collectors::{ArchiveCollector, BlockCollector, WithIndex, collector_ext::Archive},
+        collectors::{BlockCollector, EventAux, EventCollector, WithIndex, collector_ext::Archive},
         types::{Collector, CollectorStream, Storage},
     };
     use alloy::{
-        network::Ethereum,
-        primitives::{Address, B256, Bytes, Log as PrimitivesLog, LogData},
-        providers::{Provider, ProviderBuilder, RootProvider},
-        rpc::types::Log,
+        providers::{Provider, ProviderBuilder},
         sol,
-        sol_types::SolEvent,
     };
     use anyhow::Result;
     use async_trait::async_trait;
     use futures::stream;
-    use serde::Deserialize;
     use tokio::sync::Mutex;
     use tokio_stream::{self, StreamExt as _};
 
@@ -167,99 +236,15 @@ mod test {
 
     #[async_trait]
     impl Archive<u8> for TestCollector {
-        async fn replay_from(&self, n: u64) -> Result<CollectorStream<'_, u8>> {
+        async fn replay_from(
+            &self,
+            n: u64,
+            _chunk_size: Option<u64>,
+        ) -> Result<CollectorStream<'_, u8>> {
             let data = self.archive[n as usize..].to_vec();
             Ok(Box::pin(stream::iter(data)))
         }
     }
-
-    fn make_log(block_number: u64) -> Log {
-        Log {
-            inner: PrimitivesLog {
-                address: Address::with_last_byte(0x69),
-                data: LogData::new_unchecked(
-                    vec![B256::with_last_byte(0x69)],
-                    Bytes::from_static(&[0x69]),
-                ),
-            },
-            block_hash: Some(B256::with_last_byte(0x69)),
-            block_number: Some(block_number),
-            block_timestamp: None,
-            transaction_hash: Some(B256::with_last_byte(0x69)),
-            transaction_index: Some(0x69),
-            log_index: Some(0x69),
-            removed: false,
-        }
-    }
-
-    pub struct TestEventCollector<E> {
-        data: Vec<(E, Log)>,
-    }
-    impl TestEventCollector<TestEvent> {
-        pub fn new(data: Vec<u8>) -> Self {
-            let data = data
-                .into_iter()
-                .map(|e| (TestEvent::new(e), make_log(e as u64)))
-                .collect();
-            Self { data }
-        }
-    }
-
-    #[async_trait]
-    impl<E: SolEvent + Send + Sync + Clone> Collector<(E, Log)> for TestEventCollector<E> {
-        async fn subscribe(&self) -> Result<CollectorStream<'_, (E, Log)>> {
-            Ok(Box::pin(stream::iter(self.data.clone())))
-        }
-    }
-
-    #[derive(Debug, Clone, Default, Deserialize)]
-    struct TestEvent {
-        id: u8,
-    }
-
-    impl TestEvent {
-        pub fn new(id: u8) -> Self {
-            Self { id }
-        }
-    }
-
-    impl SolEvent for TestEvent {
-        type DataTuple<'a> = ();
-
-        type DataToken<'a> = ();
-
-        type TopicList = ();
-
-        const SIGNATURE: &'static str = "";
-
-        const SIGNATURE_HASH: alloy::primitives::FixedBytes<32> =
-            alloy::primitives::FixedBytes::ZERO;
-
-        const ANONYMOUS: bool = true;
-
-        fn new(
-            _topics: <Self::TopicList as alloy::dyn_abi::SolType>::RustType,
-            _data: <Self::DataTuple<'_> as alloy::dyn_abi::SolType>::RustType,
-        ) -> Self {
-            Self { id: 0 }
-        }
-
-        fn tokenize_body(&self) -> Self::DataToken<'_> {
-            unimplemented!()
-        }
-
-        fn topics(&self) -> <Self::TopicList as alloy::dyn_abi::SolType>::RustType {
-            unimplemented!()
-        }
-
-        fn encode_topics_raw(
-            &self,
-            _out: &mut [alloy::dyn_abi::abi::token::WordToken],
-        ) -> alloy::sol_types::Result<()> {
-            unimplemented!()
-        }
-    }
-
     #[derive(Clone)]
     pub struct TestStorage<E> {
         pub data: Arc<Mutex<Vec<E>>>,
@@ -311,26 +296,6 @@ mod test {
         }
     }
 
-    fn _text_provider() -> impl Provider {
-        RootProvider::<Ethereum>::builder()
-            .with_recommended_fillers()
-            .connect_anvil()
-    }
-
-    pub struct TestProvider {
-        history: Vec<Log>,
-        data: Vec<Log>,
-    }
-
-    impl TestProvider {
-        pub fn new(history: Vec<u64>, data: Vec<u64>) -> Self {
-            Self {
-                history: history.into_iter().map(make_log).collect(),
-                data: data.into_iter().map(make_log).collect(),
-            }
-        }
-    }
-
     sol! {
         #[sol(rpc, bytecode="6080806040523460135760b1908160188239f35b5f80fdfe60808060405260043610156011575f80fd5b5f3560e01c63b0e0b9ed146023575f80fd5b34607757602036600319011260775760043567ffffffffffffffff81168091036077577f606260b72639023369b8c3e5815aa6c02d57668d01bc55d84f28de6e1dc97dff60208383829552a1604051908152f35b5f80fdfea2646970667358221220437ddae43f164f5ed03de65753d1191d0e176f064936dff9afe62708d7106fba64736f6c634300081e0033")]
         contract TestContract {
@@ -354,26 +319,28 @@ mod test {
         let mut block_stream = block_collector.subscribe().await.unwrap();
 
         // Emit the first 5 events
-        let mut stage1_block_number = 0;
         let mut n: u64 = 0;
         let clone_contract = Arc::clone(&contract);
         while let Some(block) = block_stream.next().await {
             if n > 5 {
-                stage1_block_number = block.number as u64;
+                // stage1_block_number = block.number as u64;
                 break;
             }
             let _ = clone_contract.test(n).send().await.unwrap();
             n += 1;
         }
 
-        let clone_contract = Arc::clone(&contract);
+        let contract_clone = Arc::clone(&contract);
         // Continue to emit events every 100ms
         let writer_handle = tokio::spawn(async move {
             loop {
                 if n > 20 {
                     break;
                 }
-                let _ = clone_contract.test(n).send().await.unwrap();
+                let tx = contract_clone.test(n).send().await.unwrap();
+                let provider = tx.provider();
+                let block_number = provider.get_block_number().await.unwrap();
+                println!("Emitting event: {n} -- block number: {block_number}");
                 n += 1;
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
@@ -382,13 +349,20 @@ mod test {
         let ids = Arc::new(Mutex::new(vec![]));
         let ids_clone = Arc::clone(&ids);
 
-        let clone_contract = Arc::clone(&contract);
+        let contract_clone = Arc::clone(&contract);
+        let filter = contract_clone.TestEvent_filter().filter.clone();
+
+        let provider = Arc::clone(contract_clone.TestEvent_filter().provider);
+
+        let event = EventAux::new_event::<TestContract::TestEvent>(provider, filter);
         let reader_handle = tokio::spawn(async move {
             let mut ids = ids_clone.lock().await;
-            let filter = clone_contract.TestEvent_filter();
-            let archive_collector = ArchiveCollector::new(filter, 0, 100);
+
+            let archive_collector = EventCollector::new(event);
+            let archive_collector = archive_collector.load_from(0, Some(10));
+
             let mut archive_stream = archive_collector.subscribe().await.unwrap();
-            while let Some(event) = archive_stream.next().await {
+            while let Some((event, _)) = archive_stream.next().await {
                 ids.push(event.n);
                 if event.n >= 20 {
                     break;
@@ -396,11 +370,8 @@ mod test {
             }
         });
 
-        let _ = tokio::select! {
-            _ = writer_handle => {},
-            _ = reader_handle => {},
-        };
-        
+        let _ = tokio::join!(writer_handle, reader_handle);
+
         let ids = ids.lock().await;
         assert_eq!(
             ids.clone(),
@@ -408,15 +379,6 @@ mod test {
                 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20
             ]
         );
-
-        // let events = collector.collect::<Vec<_>>().await;
-        // println!("Event: {:?}", events);
-        // contract.test(1);
-
-        // let collector = TestArchiveCollector::new(vec![1, 2, 3], vec![4, 5, 6], 0);
-        // let stream = collector.subscribe().await.unwrap();
-        // let event = stream.collect::<Vec<_>>().await;
-        // assert_eq!(event, vec![1, 2, 3, 4, 5, 6]);
     }
 
     impl WithIndex for u8 {
@@ -430,7 +392,7 @@ mod test {
     async fn test_collector_enumerate() {
         let indices = vec![1, 2, 3];
         let collector = TestCollector::new(vec![], indices.clone());
-        let enumerated = collector.enumerate();
+        let enumerated = collector.enumerate_with(|e| e.index());
         let stream = enumerated.subscribe().await.unwrap();
         let event = stream.map(|(i, _)| i).collect::<Vec<_>>().await;
         assert_eq!(event, indices);
@@ -503,7 +465,7 @@ mod test {
     #[tokio::test]
     async fn test_collector_archive() {
         let collector = TestCollector::new(vec![1, 2, 3], vec![4, 5, 6]);
-        let collector = collector.load_from(2);
+        let collector = collector.load_from(2, Some(10));
         let stream = collector.subscribe().await.unwrap();
         let res = stream.collect::<Vec<_>>().await;
         assert_eq!(res, vec![3, 4, 5, 6]);
@@ -526,7 +488,7 @@ mod test {
     async fn test_collector_from_storage_scenario_1() {
         let storage = TestStorage::<u8>::with_data(vec![0, 1, 2, 3, 4]);
         let collector = TestCollector::new(vec![0, 1, 2, 3, 4], vec![5, 6, 7, 8, 9]);
-        let collector = collector.persist(storage.clone()).load_from(2);
+        let collector = collector.persist(storage.clone()).load_from(2, Some(10));
         let res = collector
             .subscribe()
             .await
@@ -542,7 +504,7 @@ mod test {
     async fn test_collector_from_storage_scenario_2() {
         let storage = TestStorage::<u8>::with_data(vec![0, 1, 2, 3, 4]);
         let collector = TestCollector::new(vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9], vec![10]);
-        let collector = collector.persist(storage.clone()).load_from(6);
+        let collector = collector.persist(storage.clone()).load_from(6, Some(10));
         let res = collector
             .subscribe()
             .await

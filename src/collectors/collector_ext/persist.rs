@@ -1,6 +1,6 @@
-use crate::types::{Archive, Collector, CollectorStream, Storage};
 use async_trait::async_trait;
 use futures::StreamExt;
+use crate::types::{Archive, Collector, CollectorStream, Storage};
 
 pub struct Persist<C, S> {
     collector: C,
@@ -17,6 +17,7 @@ impl<C, S> Persist<C, S> {
         }
     }
 }
+
 
 #[async_trait]
 impl<C, S, E> Collector<E> for Persist<C, S>
@@ -51,7 +52,7 @@ where
     S: Storage<E> + Send + Sync,
     E: Send + Sync + 'static,
 {
-    async fn replay_from(&self, i: u64) -> anyhow::Result<CollectorStream<'_, E>> {
+    async fn replay_from(&self, i: u64, chunk_size: Option<u64>) -> anyhow::Result<CollectorStream<'_, E>> {
         let h = self.storage.head().await?;
         if h >= i {
             // scenario 1: We storages first 4 values of stream s = [0,1,2,3,4,5,6,7,8,9] and want to replay from event 2.
@@ -63,7 +64,7 @@ where
 
             let n: usize = (h - i) as usize;
             let mut c = 0;
-            let from_archive = self.collector.replay_from(i).await?;
+            let from_archive = self.collector.replay_from(i, chunk_size).await?;
             let from_archive = from_archive.filter_map(move |e| async move {
                 c += 1;
                 if c > n {
@@ -83,7 +84,7 @@ where
             let from_storage = self.storage.replay_from(i).await?;
             let from_archive = self
                 .collector
-                .replay_from(i)
+                .replay_from(i, chunk_size)
                 .await?
                 .filter_map(move |e| async move { self.storage.write(&e).await.ok() });
             Ok(Box::pin(from_storage.chain(from_archive)))

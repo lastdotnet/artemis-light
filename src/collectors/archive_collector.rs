@@ -23,21 +23,15 @@ pub trait EventType<E, P> {
     type Provider: Provider;
 }
 
-impl<P, E: Debug> ArchiveCollector<P, E>
+impl<P, E> ArchiveCollector<P, E>
 where
     P: Provider,
     E: SolEvent + Send + Sync + Clone,
 {
     pub fn new(event: Event<P, E>, from: u64, chunk_size: u64) -> Self {
-        let filter = event.filter;
         let provider = Arc::new(event.provider);
-        Self {
-            provider,
-            filter,
-            chunk_size,
-            from,
-            e: PhantomData,
-        }
+        let filter = event.filter;  
+        Self { provider, filter, chunk_size, from, e: PhantomData }
     }
 
     pub async fn load(&self, from: u64, to: u64) -> Result<CollectorStream<'_, E>> {
@@ -79,7 +73,7 @@ where
 impl<P, E> Collector<E> for ArchiveCollector<P, E>
 where
     P: Provider,
-    E: SolEvent + Send + Sync + Clone + Debug,
+    E: SolEvent + Send + Sync + Clone,
 {
     async fn subscribe(&self) -> Result<CollectorStream<'_, E>> {
         let event = Event::<&P, E, Ethereum>::new(&self.provider, self.filter.clone());

@@ -1,24 +1,57 @@
-use alloy::rpc::types::Transaction;
+use crate::executors::mempool_executor::SubmitTxToMempool;
+use alloy::eips::BlockNumberOrTag;
 use anyhow::Result;
 use async_trait::async_trait;
-use jsonrpsee::core::DeserializeOwned;
 use std::pin::Pin;
 use tokio_stream::Stream;
-use tokio_stream::StreamExt;
-use tokio_stream::StreamMap;
-
-use crate::collectors::NewBlock;
-
-use crate::executors::mempool_executor::SubmitTxToMempool;
 
 /// A stream of events emitted by a [Collector].
 pub type CollectorStream<'a, E> = Pin<Box<dyn Stream<Item = E> + Send + 'a>>;
+
+pub enum Offset {
+    Genesis,
+    Latest,
+    Number(u64),
+}
+
+impl From<Offset> for BlockNumberOrTag {
+    fn from(value: Offset) -> Self {
+        match value {
+            Offset::Genesis => BlockNumberOrTag::Earliest,
+            Offset::Latest => BlockNumberOrTag::Latest,
+            Offset::Number(n) => BlockNumberOrTag::Number(n),
+        }
+    }
+}
+
+impl TryFrom<Offset> for u64 {
+    type Error = anyhow::Error;
+
+    fn try_from(value: Offset) -> Result<Self, Self::Error> {
+        match value {
+            Offset::Genesis => Ok(0),
+            Offset::Latest => Err(anyhow::anyhow!("Latest offset cannot be converted to u64")),
+            Offset::Number(n) => Ok(n),
+        }
+    }
+}
 
 /// Collector trait, which defines a source of events.
 #[async_trait]
 pub trait Collector<E>: Send + Sync {
     /// Returns the core event stream for the collector.
-    async fn get_event_stream(&self) -> Result<CollectorStream<'_, E>>;
+
+    async fn subscribe(&self) -> Result<CollectorStream<'_, E>>;
+
+    #[deprecated(since = "0.1.0", note = "Use subscribe instead")]
+    async fn get_event_stream(&self) -> Result<CollectorStream<'_, E>> {
+        self.subscribe().await
+    }
+}
+
+#[async_trait]
+pub trait Archive<E>: Send + Sync {
+    async fn replay_from(&self, n: u64, chunk_size: Option<u64>) -> Result<CollectorStream<'_, E>>;
 }
 
 /// Strategy trait, which defines the core logic for each opportunity.
@@ -39,99 +72,12 @@ pub trait Executor<A>: Send + Sync {
     async fn execute(&self, action: A) -> Result<()>;
 }
 
-/// CollectorMap is a wrapper around a [Collector] that maps outgoing
-/// events to a different type.
-pub struct CollectorMap<E, F> {
-    collector: Box<dyn Collector<E>>,
-    f: F,
-}
-impl<E, F> CollectorMap<E, F> {
-    pub fn new(collector: Box<dyn Collector<E>>, f: F) -> Self {
-        Self { collector, f }
-    }
-}
-
 #[async_trait]
-impl<E1, E2, F> Collector<E2> for CollectorMap<E1, F>
-where
-    E1: Send + Sync + DeserializeOwned + 'static,
-    E2: Send + Sync + DeserializeOwned + 'static,
-    F: Fn(E1) -> E2 + Send + Sync + Clone + 'static,
-{
-    async fn get_event_stream(&self) -> Result<CollectorStream<'_, E2>> {
-        let stream = self.collector.get_event_stream().await?;
-        let f = self.f.clone();
-        let stream = stream.map(f);
-        Ok(Box::pin(stream))
-    }
+pub trait Storage<E> {
+    async fn write(&self, record: &E) -> anyhow::Result<E>;
+    async fn replay_from(&self, n: u64) -> anyhow::Result<CollectorStream<'_, E>>;
+    async fn head(&self) -> anyhow::Result<u64>;
 }
-/// FilterCollectorMap is a wrapper around a [Collector] that maps outgoing
-/// events to a different type.
-pub struct FilterCollectorMap<E, F> {
-    collector: Box<dyn Collector<E>>,
-    f: F,
-}
-impl<E, F> FilterCollectorMap<E, F> {
-    pub fn new(collector: Box<dyn Collector<E>>, f: F) -> Self {
-        Self { collector, f }
-    }
-}
-
-#[async_trait]
-impl<E1, E2, F> Collector<E2> for FilterCollectorMap<E1, F>
-where
-    E1: Send + Sync + DeserializeOwned + 'static,
-    E2: Send + Sync + DeserializeOwned + 'static,
-    F: Fn(E1) -> Option<E2> + Send + Sync + Clone + 'static,
-{
-    async fn get_event_stream(&self) -> Result<CollectorStream<'_, E2>> {
-        let stream = self.collector.get_event_stream().await?;
-        let f = self.f.clone();
-        let stream = stream.filter_map(f);
-        Ok(Box::pin(stream))
-    }
-}
-
-pub struct CollectorMerge<C1, C2> {
-    this: C1,
-    other: C2,
-}
-
-impl<C1, C2> CollectorMerge<C1, C2> {
-    pub fn new(this: C1, other: C2) -> Self {
-        Self { this, other }
-    }
-}
-
-#[async_trait]
-impl<C1, C2, E> Collector<E> for CollectorMerge<C1, C2>
-where
-    C1: Collector<E> + Send + Sync + 'static,
-    C2: Collector<E> + Send + Sync + 'static,
-    E: Send + Sync + DeserializeOwned + 'static,
-{
-    async fn get_event_stream(&self) -> Result<CollectorStream<'_, E>> {
-        let this_stream = self.this.get_event_stream().await?;
-        let other_stream = self.other.get_event_stream().await?;
-
-        let merged = Box::pin(this_stream.merge(other_stream)) as CollectorStream<'_, E>;
-        Ok(merged)
-    }
-}
-
-#[async_trait]
-impl<E: 'static, C: Collector<E>> Collector<E> for Vec<Box<C>> {
-    async fn get_event_stream(&self) -> Result<CollectorStream<'_, E>> {
-        let mut smap = StreamMap::new();
-        for (id, collector) in self.iter().enumerate() {
-            let stream = collector.get_event_stream().await?;
-            smap.insert(id, stream);
-        }
-        let stream = Box::pin(smap.map(|(_, v)| v)) as CollectorStream<'_, E>;
-        Ok(stream)
-    }
-}
-
 /// ExecutorMap is a wrapper around an [Executor] that maps incoming
 /// actions to a different type.
 pub struct ExecutorMap<A, F> {
@@ -144,7 +90,6 @@ impl<A, F> ExecutorMap<A, F> {
         Self { executor, f }
     }
 }
-
 #[async_trait]
 impl<A1, A2, F> Executor<A1> for ExecutorMap<A2, F>
 where
@@ -159,12 +104,6 @@ where
             None => Ok(()),
         }
     }
-}
-
-/// Convenience enum containing all the events that can be emitted by collectors.
-pub enum Events {
-    NewBlock(NewBlock),
-    Transaction(Box<Transaction>),
 }
 
 /// Convenience enum containing all the actions that can be executed by executors.

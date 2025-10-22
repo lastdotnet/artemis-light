@@ -1,3 +1,5 @@
+use std::marker::PhantomData;
+
 use tokio::sync::broadcast::{self, Sender};
 use tokio::task::JoinSet;
 use tokio_stream::StreamExt;
@@ -7,31 +9,53 @@ use crate::types::{Collector, Executor, Strategy};
 
 /// The main engine of Artemis. This struct is responsible for orchestrating the
 /// data flow between collectors, strategies, and executors.
-pub struct Engine<E, A> {
+pub struct Engine<A, E, S, X> {
     /// The set of collectors that the engine will use to collect events.
     collectors: Vec<Box<dyn Collector<E>>>,
 
     /// The set of strategies that the engine will use to process events.
-    strategies: Vec<Box<dyn Strategy<E, A>>>,
+    strategies: Vec<S>,
 
     /// The set of executors that the engine will use to execute actions.
-    executors: Vec<Box<dyn Executor<A>>>,
+    executors: Vec<X>,
 
     /// The capacity of the event channel.
     event_channel_capacity: usize,
 
     /// The capacity of the action channel.
     action_channel_capacity: usize,
+
+    _a: PhantomData<A>,
 }
 
-impl<E, A> Engine<E, A> {
-    pub fn new() -> Self {
+impl<A, E, S, X> Default for Engine<A, E, S, X> {
+    fn default() -> Self {
         Self {
             collectors: vec![],
             strategies: vec![],
             executors: vec![],
             event_channel_capacity: 512,
             action_channel_capacity: 512,
+            _a: PhantomData,
+        }
+    }
+}
+
+impl<A, E, S, X> Engine<A, E, S, X> {
+    pub fn new(
+        collectors: Vec<Box<dyn Collector<E>>>,
+        strategies: Vec<S>,
+        executors: Vec<X>,
+        event_channel_capacity: usize,
+        action_channel_capacity: usize,
+    ) -> Self {
+        Self {
+            collectors,
+            strategies,
+            executors,
+            event_channel_capacity,
+            action_channel_capacity,
+            _a: PhantomData,
         }
     }
 
@@ -46,16 +70,12 @@ impl<E, A> Engine<E, A> {
     }
 }
 
-impl<E, A> Default for Engine<E, A> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl<E, A> Engine<E, A>
+impl<A, E, S, X> Engine<A, E, S, X>
 where
-    E: Send + Clone + 'static + std::fmt::Debug,
-    A: Send + Clone + 'static + std::fmt::Debug,
+    E: Send + Clone + std::fmt::Debug + 'static,
+    S: Strategy<E, A> + Send + Sync + 'static,
+    X: Executor<A> + Send + Sync + 'static,
+    A: Send + Clone + std::fmt::Debug + 'static,
 {
     /// Adds a collector to be used by the engine.
     pub fn add_collector(&mut self, collector: Box<dyn Collector<E>>) {
@@ -63,12 +83,12 @@ where
     }
 
     /// Adds a strategy to be used by the engine.
-    pub fn add_strategy(&mut self, strategy: Box<dyn Strategy<E, A>>) {
+    pub fn add_strategy(&mut self, strategy: S) {
         self.strategies.push(strategy);
     }
 
     /// Adds an executor to be used by the engine.
-    pub fn add_executor(&mut self, executor: Box<dyn Executor<A>>) {
+    pub fn add_executor(&mut self, executor: X) {
         self.executors.push(executor);
     }
 

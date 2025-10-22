@@ -8,12 +8,20 @@ use anyhow::Result;
 use async_trait::async_trait;
 
 use alloy::{
-    network::TransactionBuilder, providers::Provider, rpc::types::eth::TransactionRequest,
+    network::TransactionBuilder,
+    providers::{PendingTransactionConfig, Provider},
+    rpc::types::eth::TransactionRequest,
 };
 
 /// An executor that sends transactions to the mempool.
 pub struct MempoolExecutor<M> {
     client: Arc<M>,
+}
+
+impl<M: Provider> MempoolExecutor<M> {
+    pub fn new(client: Arc<M>) -> Self {
+        Self { client }
+    }
 }
 
 /// Information about the gas bid for a transaction.
@@ -32,19 +40,14 @@ pub struct SubmitTxToMempool {
     pub gas_bid_info: Option<GasBidInfo>,
 }
 
-impl<M: Provider> MempoolExecutor<M> {
-    pub fn new(client: Arc<M>) -> Self {
-        Self { client }
-    }
-}
-
 #[async_trait]
 impl<M> Executor<SubmitTxToMempool> for MempoolExecutor<M>
 where
     M: Provider,
 {
+    type Output = PendingTransactionConfig;
     /// Send a transaction to the mempool.
-    async fn execute(&self, mut action: SubmitTxToMempool) -> Result<()> {
+    async fn execute(&self, mut action: SubmitTxToMempool) -> Result<Option<Self::Output>> {
         let gas_usage = self
             .client
             .estimate_gas(action.tx.clone())
@@ -67,7 +70,7 @@ where
                 .map_err(|e| anyhow::anyhow!("Error getting gas price: {}", e))?;
         }
         action.tx.set_gas_price(bid_gas_price);
-        let _ = self.client.send_transaction(action.tx).await?;
-        Ok(())
+        let res = self.client.send_transaction(action.tx).await?;
+        Ok(Some(res.inner().clone()))
     }
 }

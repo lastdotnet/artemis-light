@@ -6,7 +6,7 @@ use alloy::{
 };
 use artemis_light::{
     collectors::{BlockCollector, MempoolCollector},
-    executors::mempool_executor::{MempoolExecutor, SubmitTxToMempool},
+    executors::{MempoolExecutor, SubmitTxToMempool},
     types::{Collector, Executor},
 };
 

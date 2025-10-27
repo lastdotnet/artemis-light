@@ -9,7 +9,7 @@ use crate::types::{Collector, Executor, Strategy};
 
 /// The main engine of Artemis. This struct is responsible for orchestrating the
 /// data flow between collectors, strategies, and executors.
-pub struct Engine<A, E> {
+pub struct Engine<E, A> {
     /// The set of collectors that the engine will use to collect events.
     collectors: Vec<Box<dyn Collector<E>>>,
 
@@ -28,7 +28,7 @@ pub struct Engine<A, E> {
     _a: PhantomData<A>,
 }
 
-impl<A, E> Default for Engine<A, E> {
+impl<E, A> Default for Engine<E, A> {
     fn default() -> Self {
         Self {
             collectors: vec![],
@@ -41,7 +41,7 @@ impl<A, E> Default for Engine<A, E> {
     }
 }
 
-impl<A, E> Engine<A, E> {
+impl<E, A> Engine<E, A> {
     pub fn new(
         collectors: Vec<Box<dyn Collector<E>>>,
         strategies: Vec<Box<dyn Strategy<E, A>>>,
@@ -70,7 +70,7 @@ impl<A, E> Engine<A, E> {
     }
 }
 
-impl<A, E> Engine<A, E>
+impl<E, A> Engine<E, A>
 where
     E: Send + Clone + std::fmt::Debug + 'static,
     A: Send + Clone + std::fmt::Debug + 'static,

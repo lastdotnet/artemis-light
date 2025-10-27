@@ -55,8 +55,8 @@ impl<E, F> CollectorMap<E, F> {
 #[async_trait]
 impl<E1, E2, F> Collector<E2> for CollectorMap<E1, F>
 where
-    E1: Send + Sync + DeserializeOwned + 'static,
-    E2: Send + Sync + DeserializeOwned + 'static,
+    E1: Send + Sync + 'static,
+    E2: Send + Sync + 'static,
     F: Fn(E1) -> E2 + Send + Sync + Clone + 'static,
 {
     async fn get_event_stream(&self) -> Result<CollectorStream<'_, E2>> {
@@ -81,8 +81,8 @@ impl<E, F> FilterCollectorMap<E, F> {
 #[async_trait]
 impl<E1, E2, F> Collector<E2> for FilterCollectorMap<E1, F>
 where
-    E1: Send + Sync + DeserializeOwned + 'static,
-    E2: Send + Sync + DeserializeOwned + 'static,
+    E1: Send + Sync + 'static,
+    E2: Send + Sync + 'static,
     F: Fn(E1) -> Option<E2> + Send + Sync + Clone + 'static,
 {
     async fn get_event_stream(&self) -> Result<CollectorStream<'_, E2>> {

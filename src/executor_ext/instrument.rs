@@ -17,17 +17,12 @@ impl<E, M> ExecutorInstrument<E, M> {
 impl<A, E, M> Executor<A> for ExecutorInstrument<E, M>
 where
     E: Executor<A> + 'static,
-    M: Metrics<E::Output> + Send + Sync + 'static,
+    M: Metrics<E> + Send + Sync + 'static,
     A: Send + Sync + 'static,
 {
-    type Output = E::Output;
-    async fn execute(&self, action: A) -> anyhow::Result<Option<Self::Output>> {
-        let state = self.executor.execute(action).await?;
-
-        if let Some(ref state) = state
-            && let Err(e) = self.metrics.collect_metrics(state).await {
-                tracing::warn!("error collecting metrics: {}", e);
-            }
-        Ok(state)
+    async fn execute(&mut self, action: A) -> anyhow::Result<()> {
+        self.executor.execute(action).await?;
+        self.metrics.collect_metrics(&self.executor).await?;
+        Ok(())
     }
 }

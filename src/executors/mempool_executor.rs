@@ -34,10 +34,11 @@ pub struct GasBidInfo {
     pub bid_percentage: u64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct SubmitTxToMempool {
     pub tx: TransactionRequest,
     pub gas_bid_info: Option<GasBidInfo>,
+    pub pending_tx_sender: Option<tokio::sync::oneshot::Sender<PendingTransactionConfig>>,
 }
 
 #[async_trait]
@@ -45,9 +46,8 @@ impl<M> Executor<SubmitTxToMempool> for MempoolExecutor<M>
 where
     M: Provider,
 {
-    type Output = PendingTransactionConfig;
     /// Send a transaction to the mempool.
-    async fn execute(&self, mut action: SubmitTxToMempool) -> Result<Option<Self::Output>> {
+    async fn execute(&mut self, mut action: SubmitTxToMempool) -> Result<()> {
         let gas_usage = self
             .client
             .estimate_gas(action.tx.clone())
@@ -71,6 +71,16 @@ where
         }
         action.tx.set_gas_price(bid_gas_price);
         let res = self.client.send_transaction(action.tx).await?;
-        Ok(Some(res.inner().clone()))
+
+        if let Some(pending_tx_sender) = action.pending_tx_sender {
+            let res = pending_tx_sender.send(res.inner().clone());
+            if let Err(e) = res {
+                tracing::warn!(
+                    "Error sending pending transaction config [hash]: {:?}",
+                    e.tx_hash()
+                );
+            }
+        }
+        Ok(())
     }
 }

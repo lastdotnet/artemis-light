@@ -36,9 +36,8 @@ pub trait Strategy<E, A>: Send + Sync {
 /// Executor trait, responsible for executing actions returned by strategies.
 #[async_trait]
 pub trait Executor<A>: Send + Sync {
-    type Output: Send + Sync;
     /// Execute an action.
-    async fn execute(&self, action: A) -> Result<Option<Self::Output>>;
+    async fn execute(&mut self, action: A) -> Result<()>;
 }
 
 /// CollectorMap is a wrapper around a [Collector] that maps outgoing
@@ -153,12 +152,11 @@ where
     A1: Send + Sync + 'static,
     A2: Send + Sync + 'static,
 {
-    type Output = E::Output;
-    async fn execute(&self, action: A1) -> Result<Option<Self::Output>> {
+    async fn execute(&mut self, action: A1) -> Result<()> {
         let action = (self.f)(action);
         match action {
             Some(action) => self.executor.execute(action).await,
-            None => Ok(None),
+            None => Ok(()),
         }
     }
 }

@@ -9,15 +9,15 @@ use crate::types::{Collector, Executor, Strategy};
 
 /// The main engine of Artemis. This struct is responsible for orchestrating the
 /// data flow between collectors, strategies, and executors.
-pub struct Engine<A, E, S, X> {
+pub struct Engine<A, E> {
     /// The set of collectors that the engine will use to collect events.
     collectors: Vec<Box<dyn Collector<E>>>,
 
     /// The set of strategies that the engine will use to process events.
-    strategies: Vec<S>,
+    strategies: Vec<Box<dyn Strategy<E, A>>>,
 
     /// The set of executors that the engine will use to execute actions.
-    executors: Vec<X>,
+    executors: Vec<Box<dyn Executor<A>>>,
 
     /// The capacity of the event channel.
     event_channel_capacity: usize,
@@ -28,7 +28,7 @@ pub struct Engine<A, E, S, X> {
     _a: PhantomData<A>,
 }
 
-impl<A, E, S, X> Default for Engine<A, E, S, X> {
+impl<A, E> Default for Engine<A, E> {
     fn default() -> Self {
         Self {
             collectors: vec![],
@@ -41,11 +41,11 @@ impl<A, E, S, X> Default for Engine<A, E, S, X> {
     }
 }
 
-impl<A, E, S, X> Engine<A, E, S, X> {
+impl<A, E> Engine<A, E> {
     pub fn new(
         collectors: Vec<Box<dyn Collector<E>>>,
-        strategies: Vec<S>,
-        executors: Vec<X>,
+        strategies: Vec<Box<dyn Strategy<E, A>>>,
+        executors: Vec<Box<dyn Executor<A>>>,
         event_channel_capacity: usize,
         action_channel_capacity: usize,
     ) -> Self {
@@ -70,11 +70,9 @@ impl<A, E, S, X> Engine<A, E, S, X> {
     }
 }
 
-impl<A, E, S, X> Engine<A, E, S, X>
+impl<A, E> Engine<A, E>
 where
     E: Send + Clone + std::fmt::Debug + 'static,
-    S: Strategy<E, A> + Send + Sync + 'static,
-    X: Executor<A> + Send + Sync + 'static,
     A: Send + Clone + std::fmt::Debug + 'static,
 {
     /// Adds a collector to be used by the engine.
@@ -83,12 +81,12 @@ where
     }
 
     /// Adds a strategy to be used by the engine.
-    pub fn add_strategy(&mut self, strategy: S) {
+    pub fn add_strategy(&mut self, strategy: Box<dyn Strategy<E, A>>) {
         self.strategies.push(strategy);
     }
 
     /// Adds an executor to be used by the engine.
-    pub fn add_executor(&mut self, executor: X) {
+    pub fn add_executor(&mut self, executor: Box<dyn Executor<A>>) {
         self.executors.push(executor);
     }
 
@@ -102,7 +100,7 @@ where
         let mut set = JoinSet::new();
 
         // Spawn executors in separate threads.
-        for executor in self.executors {
+        for mut executor in self.executors {
             let mut receiver = action_sender.subscribe();
             set.spawn(async move {
                 info!("starting executor... ");

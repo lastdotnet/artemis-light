@@ -30,14 +30,14 @@ pub trait Strategy<E, A>: Send + Sync {
 
     /// AWK: We probably want to return a Result here, too.
     /// Process an event, and return an action if needed.
-    async fn process_event(&mut self, event: E) -> Vec<A>;
+    async fn process_event(&mut self, event: E) -> Result<Vec<A>>;
 }
 
 /// Executor trait, responsible for executing actions returned by strategies.
 #[async_trait]
-pub trait Executor<A>: Send + Sync {
+pub trait Executor<A, R = ()>: Send + Sync {
     /// Execute an action.
-    async fn execute(&mut self, action: A) -> Result<()>;
+    async fn execute(&mut self, action: A) -> Result<Option<R>>;
 }
 
 /// CollectorMap is a wrapper around a [Collector] that maps outgoing
@@ -145,18 +145,19 @@ impl<E, F> ExecutorFilterMap<E, F> {
 }
 
 #[async_trait]
-impl<A1, A2, E, F> Executor<A1> for ExecutorFilterMap<E, F>
+impl<A1, A2, R, E, F> Executor<A1, R> for ExecutorFilterMap<E, F>
 where
-    E: Executor<A2> + Send + Sync + 'static,
+    E: Executor<A2, R> + Send + Sync + 'static,
     F: Fn(A1) -> Option<A2> + Send + Sync + Clone + 'static,
     A1: Send + Sync + 'static,
     A2: Send + Sync + 'static,
+    R: Send + Sync + 'static,
 {
-    async fn execute(&mut self, action: A1) -> Result<()> {
+    async fn execute(&mut self, action: A1) -> Result<Option<R>> {
         let action = (self.f)(action);
         match action {
             Some(action) => self.executor.execute(action).await,
-            None => Ok(()),
+            None => Ok(None),
         }
     }
 }
@@ -173,9 +174,9 @@ pub enum Actions {
     SubmitTxToMempool(SubmitTxToMempool),
 }
 
-pub trait Metrics<S> {
+pub trait Metrics<T> {
     fn collect_metrics(
-        &self,
-        state: &S,
+        &mut self,
+        value: &T,
     ) -> impl std::future::Future<Output = anyhow::Result<()>> + Send;
 }

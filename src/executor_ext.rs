@@ -3,7 +3,7 @@ pub use instrument::*;
 
 use crate::types::{Executor, Metrics};
 
-pub trait ExecutorExt<A>: Executor<A> + Send + Sync + Sized {
+pub trait ExecutorExt<A, R>: Executor<A, R> + Send + Sync + Sized {
     fn instrument<M>(self, metrics: M) -> ExecutorInstrument<Self, M>
     where
         M: Metrics<Self> + Send + Sync + 'static,
@@ -12,7 +12,7 @@ pub trait ExecutorExt<A>: Executor<A> + Send + Sync + Sized {
     }
 }
 
-impl<T: Executor<A> + 'static, A> ExecutorExt<A> for T {}
+impl<T: Executor<A, R> + 'static, A, R> ExecutorExt<A, R> for T {}
 
 #[cfg(test)]
 mod test {

@@ -14,15 +14,16 @@ impl<E, M> ExecutorInstrument<E, M> {
 }
 
 #[async_trait]
-impl<A, E, M> Executor<A> for ExecutorInstrument<E, M>
+impl<A, R, E, M> Executor<A, R> for ExecutorInstrument<E, M>
 where
-    E: Executor<A> + 'static,
-    M: Metrics<E> + Send + Sync + 'static,
+    E: Executor<A, R> + 'static,
+    M: Metrics<anyhow::Result<Option<R>>> + Send + Sync + 'static,
     A: Send + Sync + 'static,
+    R: Send + Sync + 'static,
 {
-    async fn execute(&mut self, action: A) -> anyhow::Result<()> {
-        self.executor.execute(action).await?;
-        self.metrics.collect_metrics(&self.executor).await?;
-        Ok(())
+    async fn execute(&mut self, action: A) -> anyhow::Result<Option<R>> {
+        let result = self.executor.execute(action).await;
+        self.metrics.collect_metrics(&result).await?;
+        result
     }
 }

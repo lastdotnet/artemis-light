@@ -47,13 +47,16 @@ mod test {
 
     #[async_trait]
     impl Strategy<usize, usize> for TestStrategy {
-        async fn sync_state(&mut self) -> anyhow::Result<()> {
+        async fn sync_state(&mut self) -> Result<(), Box<dyn std::error::Error>> {
             Ok(())
         }
 
-        async fn process_event(&mut self, event: usize) -> Vec<usize> {
+        async fn process_event(
+            &mut self,
+            event: usize,
+        ) -> StrategyResult<'_, usize> {
             self.state += event;
-            vec![event]
+            Ok(Box::pin(stream::iter(vec![Ok(event)])))
         }
     }
 

@@ -8,7 +8,7 @@ edition = "2024"
 [dependencies]
 ## async
 async-trait = "0.1"
-futures = "0.3"
+futures = { git = "https://github.com/rust-lang/futures-rs.git", branch = "master" }
 tokio = { version = "1.44", features = ["full"] }
 tokio-stream = { version = "0.1", features = ['sync'] }
 jsonrpsee = { version = "0.24", features = ["client", "async-client"] }
@@ -19,3 +19,5 @@ alloy = { version = "1.0", features = [
 ## misc
 anyhow = "1.0.97"
 tracing = "0.1.41"
+thiserror = "2.0.12"
+tokio-util = "0.7.17"

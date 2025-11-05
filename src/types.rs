@@ -1,11 +1,10 @@
 use alloy::rpc::types::Transaction;
 use anyhow::Result;
 use async_trait::async_trait;
+use futures::stream;
+use futures::{Stream, StreamExt, stream::select};
 use jsonrpsee::core::DeserializeOwned;
 use std::pin::Pin;
-use tokio_stream::Stream;
-use tokio_stream::StreamExt;
-use tokio_stream::StreamMap;
 
 use crate::collectors::NewBlock;
 
@@ -13,6 +12,7 @@ use crate::executors::SubmitTxToMempool;
 
 /// A stream of events emitted by a [Collector].
 pub type CollectorStream<'a, E> = Pin<Box<dyn Stream<Item = E> + Send + 'a>>;
+pub type ActionStream<'a, A> = Pin<Box<dyn Stream<Item = A> + Send + 'a>>;
 
 /// Collector trait, which defines a source of events.
 #[async_trait]
@@ -21,16 +21,21 @@ pub trait Collector<E>: Send + Sync {
     async fn get_event_stream(&self) -> Result<CollectorStream<'_, E>>;
 }
 
+pub type StrategyResult<'a, A> = Result<
+    ActionStream<'a, Result<A, Box<dyn std::error::Error + Send + 'a>>>,
+    Box<dyn std::error::Error + Send + 'a>,
+>;
+
 /// Strategy trait, which defines the core logic for each opportunity.
 #[async_trait]
 pub trait Strategy<E, A>: Send + Sync {
     /// Sync the initial state of the strategy if needed, usually by fetching
     /// onchain data.
-    async fn sync_state(&mut self) -> Result<()>;
+    async fn sync_state(&mut self) -> Result<(), Box<dyn std::error::Error>>;
 
     /// AWK: We probably want to return a Result here, too.
     /// Process an event, and return an action if needed.
-    async fn process_event(&mut self, event: E) -> Result<Vec<A>>;
+    async fn process_event(&mut self, event: E) -> StrategyResult<'_, A>;
 }
 
 /// Executor trait, responsible for executing actions returned by strategies.
@@ -87,8 +92,10 @@ where
 {
     async fn get_event_stream(&self) -> Result<CollectorStream<'_, E2>> {
         let stream = self.collector.get_event_stream().await?;
-        let f = self.f.clone();
-        let stream = stream.filter_map(f);
+        let stream = stream.filter_map(move |item| {
+            let f = self.f.clone();
+            async move { f(item) }
+        });
         Ok(Box::pin(stream))
     }
 }
@@ -114,7 +121,7 @@ where
     async fn get_event_stream(&self) -> Result<CollectorStream<'_, E>> {
         let this_stream = self.this.get_event_stream().await?;
         let other_stream = self.other.get_event_stream().await?;
-        let merged = Box::pin(this_stream.merge(other_stream)) as CollectorStream<'_, E>;
+        let merged = Box::pin(select(this_stream, other_stream)) as CollectorStream<'_, E>;
         Ok(merged)
     }
 }
@@ -122,13 +129,10 @@ where
 #[async_trait]
 impl<E: 'static, C: Collector<E>> Collector<E> for Vec<Box<C>> {
     async fn get_event_stream(&self) -> Result<CollectorStream<'_, E>> {
-        let mut smap = StreamMap::new();
-        for (id, collector) in self.iter().enumerate() {
-            let stream = collector.get_event_stream().await?;
-            smap.insert(id, stream);
-        }
-        let stream = Box::pin(smap.map(|(_, v)| v)) as CollectorStream<'_, E>;
-        Ok(stream)
+        let stream = stream::iter(self)
+            .filter_map(|collector| async move { collector.get_event_stream().await.ok() })
+            .flatten();
+        Ok(Box::pin(stream))
     }
 }
 /// ExecutorMap is a wrapper around an [Executor] that maps incoming
@@ -175,8 +179,8 @@ pub enum Actions {
 }
 
 pub trait Metrics<T> {
-    fn collect_metrics(
-        &mut self,
-        value: &T,
-    ) -> impl std::future::Future<Output = anyhow::Result<()>> + Send;
+    fn collect_metrics<E>(
+        &self,
+        value: &std::result::Result<T, E>,
+    ) -> impl std::future::Future<Output = ()> + Send;
 }

@@ -17,13 +17,21 @@ impl<E, M> ExecutorInstrument<E, M> {
 impl<A, R, E, M> Executor<A, R> for ExecutorInstrument<E, M>
 where
     E: Executor<A, R> + 'static,
-    M: Metrics<anyhow::Result<Option<R>>> + Send + Sync + 'static,
+    M: Metrics<R> + Send + Sync + 'static,
     A: Send + Sync + 'static,
     R: Send + Sync + 'static,
 {
     async fn execute(&mut self, action: A) -> anyhow::Result<Option<R>> {
-        let result = self.executor.execute(action).await;
-        self.metrics.collect_metrics(&result).await?;
-        result
+        match self.executor.execute(action).await {
+            Ok(Some(result)) => {
+                let _ = self.metrics.collect_metrics(Ok(&result)).await;
+                Ok(Some(result))
+            }
+            Err(err) => {
+                let _ = self.metrics.collect_metrics(Err(&err)).await;
+                Err(err)
+            }
+            _ => Ok(None),
+        }
     }
 }

@@ -3,16 +3,16 @@ pub use instrument::*;
 
 use crate::types::{Executor, Metrics};
 
-pub trait ExecutorExt<A>: Executor<A> + Send + Sync + Sized {
+pub trait ExecutorExt<A, R, Err>: Executor<A, R, Err> + Send + Sync + Sized {
     fn instrument<M>(self, metrics: M) -> ExecutorInstrument<Self, M>
     where
-        M: Metrics<Self> + Send + Sync + 'static,
+        M: Metrics<R, Err> + Send + Sync + 'static,
     {
         ExecutorInstrument::new(self, metrics)
     }
 }
 
-impl<T: Executor<A> + 'static, A> ExecutorExt<A> for T {}
+impl<T: Executor<A, R, Err> + 'static, A, R, Err> ExecutorExt<A, R, Err> for T {}
 
 #[cfg(test)]
 mod test {
@@ -34,10 +34,17 @@ mod test {
         }
     }
 
-    impl Metrics<TestExecutor> for TestMetricsCollector {
-        fn collect_metrics(
+    impl Metrics<TestExecutor, ()> for TestMetricsCollector {
+        fn collect_err(
             &self,
-            _executor: &TestExecutor,
+            err: &(),
+        ) -> impl std::future::Future<Output = anyhow::Result<()>> + Send {
+            async { Ok(()) }
+        }
+
+        fn collect_ok(
+            &self,
+            output: &usize,
         ) -> impl std::future::Future<Output = anyhow::Result<()>> + Send {
             self.state.fetch_add(1, Ordering::Relaxed);
             async { Ok(()) }
@@ -53,7 +60,7 @@ mod test {
     }
 
     #[async_trait]
-    impl Executor<usize> for TestExecutor {
+    impl Executor<usize, (), ()> for TestExecutor {
         async fn execute(&mut self, _action: usize) -> anyhow::Result<()> {
             Ok(())
         }

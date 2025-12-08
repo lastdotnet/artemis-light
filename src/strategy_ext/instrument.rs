@@ -15,14 +15,15 @@ impl<S, M> StrategyInstrument<S, M> {
 }
 
 #[async_trait]
-impl<E, A, S, M> Strategy<E, A> for StrategyInstrument<S, M>
+impl<E, A, S, M, Err> Strategy<E, A, Err> for StrategyInstrument<S, M>
 where
-    S: Strategy<E, A> + 'static,
-    M: Metrics<A> + Send + Sync + 'static,
+    S: Strategy<E, A, Err> + 'static,
+    M: Metrics<A, Err> + Send + Sync + 'static,
     A: Send + Sync + 'static,
     E: Send + Sync + 'static,
+    Err: Send + Sync + 'static,
 {
-    async fn process_event(&mut self, event: E) -> anyhow::Result<ActionStream<'_, A>> {
+    async fn process_event(&mut self, event: E) -> anyhow::Result<ActionStream<'_, Result<A, Err>>> {
         let res = self.strategy.process_event(event).await?;
         let res = res.then(|action| async {
             let _ = self.metrics.collect_metrics(&action).await;

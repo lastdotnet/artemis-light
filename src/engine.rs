@@ -1,5 +1,3 @@
-use std::marker::PhantomData;
-
 use tokio::sync::broadcast::{self, Sender};
 use tokio::task::JoinSet;
 use tokio_stream::StreamExt;
@@ -9,26 +7,24 @@ use crate::types::{Collector, Executor, Strategy};
 
 /// The main engine of Artemis. This struct is responsible for orchestrating the
 /// data flow between collectors, strategies, and executors.
-pub struct Engine<E, A> {
+pub struct Engine<E, A, R, ExErr, StErr> {
     /// The set of collectors that the engine will use to collect events.
     collectors: Vec<Box<dyn Collector<E>>>,
 
     /// The set of strategies that the engine will use to process events.
-    strategies: Vec<Box<dyn Strategy<E, A>>>,
+    strategies: Vec<Box<dyn Strategy<E, A, StErr>>>,
 
     /// The set of executors that the engine will use to execute actions.
-    executors: Vec<Box<dyn Executor<A>>>,
+    executors: Vec<Box<dyn Executor<A, R, ExErr>>>,
 
     /// The capacity of the event channel.
     event_channel_capacity: usize,
 
     /// The capacity of the action channel.
     action_channel_capacity: usize,
-
-    _a: PhantomData<A>,
 }
 
-impl<E, A> Default for Engine<E, A> {
+impl<E, A, R, ExErr, StErr> Default for Engine<E, A, R, ExErr, StErr> {
     fn default() -> Self {
         Self {
             collectors: vec![],
@@ -36,16 +32,15 @@ impl<E, A> Default for Engine<E, A> {
             executors: vec![],
             event_channel_capacity: 512,
             action_channel_capacity: 512,
-            _a: PhantomData,
         }
     }
 }
 
-impl<E, A> Engine<E, A> {
+impl<E, A, R, ExErr, StErr> Engine<E, A, R, ExErr, StErr> {
     pub fn new(
         collectors: Vec<Box<dyn Collector<E>>>,
-        strategies: Vec<Box<dyn Strategy<E, A>>>,
-        executors: Vec<Box<dyn Executor<A>>>,
+        strategies: Vec<Box<dyn Strategy<E, A, StErr>>>,
+        executors: Vec<Box<dyn Executor<A, R, ExErr>>>,
         event_channel_capacity: usize,
         action_channel_capacity: usize,
     ) -> Self {
@@ -55,7 +50,6 @@ impl<E, A> Engine<E, A> {
             executors,
             event_channel_capacity,
             action_channel_capacity,
-            _a: PhantomData,
         }
     }
 
@@ -70,10 +64,12 @@ impl<E, A> Engine<E, A> {
     }
 }
 
-impl<E, A> Engine<E, A>
+impl<E, A, R, ExErr: std::error::Error + 'static, StErr: std::error::Error + 'static>
+    Engine<E, A, R, ExErr, StErr>
 where
     E: Send + Clone + std::fmt::Debug + 'static,
     A: Send + Clone + std::fmt::Debug + 'static,
+    R: Send + Clone + std::fmt::Debug + 'static,
 {
     /// Adds a collector to be used by the engine.
     pub fn add_collector(&mut self, collector: Box<dyn Collector<E>>) {
@@ -81,12 +77,12 @@ where
     }
 
     /// Adds a strategy to be used by the engine.
-    pub fn add_strategy(&mut self, strategy: Box<dyn Strategy<E, A>>) {
+    pub fn add_strategy(&mut self, strategy: Box<dyn Strategy<E, A, StErr>>) {
         self.strategies.push(strategy);
     }
 
     /// Adds an executor to be used by the engine.
-    pub fn add_executor(&mut self, executor: Box<dyn Executor<A>>) {
+    pub fn add_executor(&mut self, executor: Box<dyn Executor<A, R, ExErr>>) {
         self.executors.push(executor);
     }
 
@@ -108,7 +104,7 @@ where
                     match receiver.recv().await {
                         Ok(action) => match executor.execute(action).await {
                             Ok(_) => {}
-                            Err(e) => error!("error executing action: {}", e),
+                            Err(e) => error!("error executing action: {:?}", e),
                         },
                         Err(e) => error!("error receiving action: {}", e),
                     }
@@ -129,9 +125,11 @@ where
                         Ok(event) => {
                             if let Ok(mut action_stream) = strategy.process_event(event).await {
                                 while let Some(action) = action_stream.next().await {
-                                    match action_sender.send(action) {
-                                        Ok(_) => {}
-                                        Err(e) => error!("error sending action: {}", e),
+                                    if let Ok(action) = action {
+                                        match action_sender.send(action) {
+                                            Ok(_) => {}
+                                            Err(e) => error!("error sending action: {}", e),
+                                        }
                                     }
                                 }
                             }

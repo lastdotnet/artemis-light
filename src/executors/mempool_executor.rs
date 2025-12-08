@@ -1,24 +1,30 @@
 use std::{
+    marker::PhantomData,
     ops::{Div, Mul},
     sync::Arc,
 };
 
 use crate::types::Executor;
-use anyhow::Result;
 use async_trait::async_trait;
 
 use alloy::{
-    network::TransactionBuilder, providers::Provider, rpc::types::eth::TransactionRequest,
+    network::TransactionBuilder,
+    providers::Provider,
+    rpc::types::{TransactionReceipt, eth::TransactionRequest},
 };
 
 /// An executor that sends transactions to the mempool.
-pub struct MempoolExecutor<M> {
+pub struct MempoolExecutor<M, Err> {
     client: Arc<M>,
+    _err: PhantomData<Err>,
 }
 
-impl<M: Provider> MempoolExecutor<M> {
+impl<M: Provider, Err> MempoolExecutor<M, Err> {
     pub fn new(client: Arc<M>) -> Self {
-        Self { client }
+        Self {
+            client,
+            _err: PhantomData,
+        }
     }
 }
 
@@ -39,17 +45,17 @@ pub struct SubmitTxToMempool {
 }
 
 #[async_trait]
-impl<M> Executor<SubmitTxToMempool> for MempoolExecutor<M>
+impl<M> Executor<SubmitTxToMempool, TransactionReceipt, ()> for MempoolExecutor<M, ()>
 where
     M: Provider,
 {
     /// Send a transaction to the mempool.
-    async fn execute(&mut self, mut action: SubmitTxToMempool) -> Result<()> {
+    async fn execute(&mut self, mut action: SubmitTxToMempool) -> Result<TransactionReceipt, ()> {
         let gas_usage = self
             .client
             .estimate_gas(action.tx.clone())
             .await
-            .map_err(|e| anyhow::anyhow!("Error estimating gas usage: {}", e))?;
+            .map_err(|_| ())?;
 
         let bid_gas_price;
         if let Some(gas_bid_info) = action.gas_bid_info {
@@ -60,14 +66,15 @@ where
                 .mul(gas_bid_info.bid_percentage as u128)
                 .div(100);
         } else {
-            bid_gas_price = self
-                .client
-                .get_gas_price()
-                .await
-                .map_err(|e| anyhow::anyhow!("Error getting gas price: {}", e))?;
+            bid_gas_price = self.client.get_gas_price().await.map_err(|_| ())?;
         }
         action.tx.set_gas_price(bid_gas_price);
-        let _pending_tx = self.client.send_transaction(action.tx).await?;
-        Ok(())
+        let pending_tx = self
+            .client
+            .send_transaction(action.tx)
+            .await
+            .map_err(|_| ())?;
+        let tx_receipt = pending_tx.get_receipt().await.map_err(|_| ())?;
+        Ok(tx_receipt)
     }
 }

@@ -3,16 +3,16 @@ pub use instrument::*;
 
 use crate::types::{Metrics, Strategy};
 
-pub trait StrategyExt<E, A>: Strategy<E, A> + Send + Sync + Sized {
+pub trait StrategyExt<E, A, Err>: Strategy<E, A, Err> + Send + Sync + Sized {
     fn instrument<M>(self, metrics: M) -> StrategyInstrument<Self, M>
     where
-        M: Metrics<A> + Send + Sync + 'static,
+        M: Metrics<A, Err> + Send + Sync + 'static,
     {
         StrategyInstrument::new(self, metrics)
     }
 }
 
-impl<E, A, T: Strategy<E, A> + 'static> StrategyExt<E, A> for T {}
+impl<E, A, Err, T: Strategy<E, A, Err> + 'static> StrategyExt<E, A, Err> for T {}
 
 #[cfg(test)]
 mod test {
@@ -59,11 +59,12 @@ mod test {
         }
     }
 
-    impl Metrics<usize> for TestMetrics {
-        fn collect_metrics(
-            &self,
-            _action: &usize,
-        ) -> impl std::future::Future<Output = anyhow::Result<()>> + Send {
+    impl Metrics<usize, ()> for TestMetrics {
+        fn collect_err(&self, err: &()) -> impl std::future::Future<Output = anyhow::Result<()>> + Send {
+            async { Ok(()) }
+        }
+
+        fn collect_ok(&self, output: &usize) -> impl std::future::Future<Output = anyhow::Result<()>> + Send {
             self.call_count.fetch_add(1, Ordering::Relaxed);
             async { Ok(()) }
         }

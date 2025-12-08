@@ -1,9 +1,10 @@
 use alloy::rpc::types::Transaction;
-use anyhow::Result;
 use async_trait::async_trait;
 use futures::{Stream, StreamExt, stream::select};
 use jsonrpsee::core::DeserializeOwned;
+use std::marker::PhantomData;
 use std::pin::Pin;
+use tokio_stream::StreamMap;
 
 use crate::collectors::NewBlock;
 
@@ -17,26 +18,27 @@ pub type ActionStream<'a, A> = Pin<Box<dyn Stream<Item = A> + Send + 'a>>;
 #[async_trait]
 pub trait Collector<E>: Send + Sync {
     /// Returns the core event stream for the collector.
-    async fn get_event_stream(&self) -> Result<CollectorStream<'_, E>>;
+    async fn get_event_stream(&self) -> anyhow::Result<CollectorStream<'_, E>>;
 }
 
 /// Strategy trait, which defines the core logic for each opportunity.
 #[async_trait]
-pub trait Strategy<E, A>: Send + Sync {
+pub trait Strategy<E, A, Err>: Send + Sync {
     /// Sync the initial state of the strategy if needed, usually by fetching
     /// onchain data.
-    async fn sync_state(&mut self) -> Result<()>;
+    async fn sync_state(&mut self) -> anyhow::Result<()>;
 
     /// AWK: We probably want to return a Result here, too.
     /// Process an event, and return an action if needed.
-    async fn process_event(&mut self, event: E) -> Result<ActionStream<'_, A>>;
+    async fn process_event(&mut self, event: E)
+    -> anyhow::Result<ActionStream<'_, Result<A, Err>>>;
 }
 
 /// Executor trait, responsible for executing actions returned by strategies.
 #[async_trait]
-pub trait Executor<A>: Send + Sync {
+pub trait Executor<A, R, Err>: Send + Sync {
     /// Execute an action.
-    async fn execute(&mut self, action: A) -> Result<()>;
+    async fn execute(&mut self, action: A) -> Result<R, Err>;
 }
 
 /// CollectorMap is a wrapper around a [Collector] that maps outgoing
@@ -58,7 +60,7 @@ where
     E2: Send + Sync + 'static,
     F: Fn(E1) -> E2 + Send + Sync + Clone + 'static,
 {
-    async fn get_event_stream(&self) -> Result<CollectorStream<'_, E2>> {
+    async fn get_event_stream(&self) -> anyhow::Result<CollectorStream<'_, E2>> {
         let stream = self.collector.get_event_stream().await?;
         let f = self.f.clone();
         let stream = stream.map(f);
@@ -84,7 +86,7 @@ where
     E2: Send + Sync + 'static,
     F: Fn(E1) -> Option<E2> + Send + Sync + Clone + 'static,
 {
-    async fn get_event_stream(&self) -> Result<CollectorStream<'_, E2>> {
+    async fn get_event_stream(&self) -> anyhow::Result<CollectorStream<'_, E2>> {
         let stream = self.collector.get_event_stream().await?;
         let stream = stream.filter_map(move |event| {
             let f = self.f.clone();
@@ -112,7 +114,7 @@ where
     C2: Collector<E> + Send + Sync + 'static,
     E: Send + Sync + DeserializeOwned + 'static,
 {
-    async fn get_event_stream(&self) -> Result<CollectorStream<'_, E>> {
+    async fn get_event_stream(&self) -> anyhow::Result<CollectorStream<'_, E>> {
         let this_stream = self.this.get_event_stream().await?;
         let other_stream = self.other.get_event_stream().await?;
         let merged = Box::pin(select(this_stream, other_stream)) as CollectorStream<'_, E>;
@@ -122,12 +124,14 @@ where
 
 #[async_trait]
 impl<E: 'static, C: Collector<E>> Collector<E> for Vec<Box<C>> {
-    async fn get_event_stream(&self) -> Result<CollectorStream<'_, E>> {
-        let stream = futures::stream::iter(self.iter())
-            .then(|collector| collector.get_event_stream())
-            .filter_map(|result| async { result.ok() })
-            .flatten();
-        Ok(Box::pin(stream))
+    async fn get_event_stream(&self) -> anyhow::Result<CollectorStream<'_, E>> {
+        let mut smap = StreamMap::new();
+        for (id, collector) in self.iter().enumerate() {
+            let stream = collector.get_event_stream().await?;
+            smap.insert(id, stream);
+        }
+        let stream = Box::pin(smap.map(|(_, v)| v)) as CollectorStream<'_, E>;
+        Ok(stream)
     }
 }
 /// ExecutorMap is a wrapper around an [Executor] that maps incoming
@@ -144,18 +148,18 @@ impl<E, F> ExecutorFilterMap<E, F> {
 }
 
 #[async_trait]
-impl<A1, A2, E, F> Executor<A1> for ExecutorFilterMap<E, F>
+impl<A1, A2, E, F, R: Default, Err> Executor<A1, Option<R>, Err> for ExecutorFilterMap<E, F>
 where
-    E: Executor<A2> + Send + Sync + 'static,
+    E: Executor<A2, R, Err> + Send + Sync + 'static,
     F: Fn(A1) -> Option<A2> + Send + Sync + Clone + 'static,
     A1: Send + Sync + 'static,
     A2: Send + Sync + 'static,
 {
-    async fn execute(&mut self, action: A1) -> Result<()> {
+    async fn execute(&mut self, action: A1) -> Result<Option<R>, Err> {
         let action = (self.f)(action);
         match action {
-            Some(action) => self.executor.execute(action).await,
-            None => Ok(()),
+            Some(action) => self.executor.execute(action).await.map(Some),
+            None => Ok(None),
         }
     }
 }
@@ -172,9 +176,96 @@ pub enum Actions {
     SubmitTxToMempool(SubmitTxToMempool),
 }
 
-pub trait Metrics<S> {
+pub trait Metrics<R, Err> {
     fn collect_metrics(
         &self,
-        state: &S,
+        result: &Result<R, Err>,
+    ) -> impl std::future::Future<Output = anyhow::Result<()>> + Send
+    where
+        Self: Sync,
+        R: Sync,
+        Err: Sync,
+    {
+        async move {
+            match result {
+                Ok(output) => self.collect_ok(output).await,
+                Err(err) => self.collect_err(err).await,
+            }
+        }
+    }
+
+    fn collect_err(
+        &self,
+        err: &Err,
     ) -> impl std::future::Future<Output = anyhow::Result<()>> + Send;
+
+    fn collect_ok(
+        &self,
+        output: &R,
+    ) -> impl std::future::Future<Output = anyhow::Result<()>> + Send;
+}
+
+pub struct StrategyFilterMap<S, F, A> {
+    strategy: S,
+    f: F,
+    _a: PhantomData<A>,
+}
+
+impl<S, F, A> StrategyFilterMap<S, F, A> {
+    pub fn new(strategy: S, f: F) -> Self {
+        Self {
+            strategy,
+            f,
+            _a: PhantomData,
+        }
+    }
+}
+
+// #[async_trait]
+// impl<A1, A2, E, S, F, Err> Strategy<E, A1, Err> for StrategyFilterMap<S, F>
+// where
+//     S: Strategy<E, A2, Err> + Send + Sync + 'static,
+//     F: Fn(Result<A2, Err>) -> Option<Result<A1, Err>> + Send + Sync + Clone + 'static,
+//     A1: Send + Sync + 'static,
+//     A2: Send + Sync + 'static,
+//     E: Send + Sync + 'static,
+//     Err: Send + Sync + 'static,
+// {
+//     async fn process_event(
+//         &mut self,
+//         event: E,
+//     ) -> anyhow::Result<ActionStream<'_, Result<A, Err>>> {
+//         let actions = self.strategy.process_event(event).await?;
+//         let actions = actions.filter_map(|action| async { (self.f)(action) });
+//         Ok(Box::pin(actions))
+//     }
+//     async fn sync_state(&mut self) -> anyhow::Result<()> {
+//         self.strategy.sync_state().await
+//     }
+// }
+
+#[async_trait]
+impl<A1, A2, E, F, S, Err> Strategy<E, A2, Err> for StrategyFilterMap<S, F, A1>
+where
+    S: Strategy<E, A1, Err>,
+    F: Fn(Result<A1, Err>) -> Option<Result<A2, Err>> + Send + Sync + Clone + 'static,
+    A1: Send + Sync + 'static,
+    A2: Send,
+    E: Send + 'static,
+    Err: Send + 'static,
+{
+    async fn sync_state(&mut self) -> anyhow::Result<()> {
+        self.strategy.sync_state().await
+    }
+    async fn process_event(
+        &mut self,
+        event: E,
+    ) -> anyhow::Result<ActionStream<'_, Result<A2, Err>>> {
+        let actions = self.strategy.process_event(event).await?;
+        let actions = actions.filter_map(|action| {
+            let f = self.f.clone();
+            async move { f(action) }
+        });
+        Ok(Box::pin(actions))
+    }
 }

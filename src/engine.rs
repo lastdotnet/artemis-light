@@ -143,9 +143,21 @@ where
             let mut event_receiver = event_sender.subscribe();
             let action_sender = action_sender.clone();
             let child = token.child_token();
-            strategy.sync_state().await?;
 
             set.spawn(async move {
+                info!("syncing strategy state...");
+                tokio::select! {
+                    _ = child.cancelled() => {
+                        info!("strategy cancelled during sync");
+                        return;
+                    }
+                    result = strategy.sync_state() => {
+                        if let Err(e) = result {
+                            error!("failed to sync strategy state: {}", e);
+                            return;
+                        }
+                    }
+                }
                 info!("starting strategy... ");
                 loop {
                     tokio::select! {
@@ -158,9 +170,22 @@ where
                                 Ok(event) => {
                                     match strategy.process_event(event).await {
                                         Ok(mut action_stream) => {
-                                            while let Some(action) = action_stream.next().await {
-                                                if let Err(e) = action_sender.send(action) {
-                                                    error!("error sending action: {}", e);
+                                            loop {
+                                                tokio::select! {
+                                                    _ = child.cancelled() => {
+                                                        info!("strategy shutting down while draining action stream");
+                                                        return;
+                                                    }
+                                                    action = action_stream.next() => {
+                                                        match action {
+                                                            Some(action) => {
+                                                                if let Err(e) = action_sender.send(action) {
+                                                                    error!("error sending action: {}", e);
+                                                                }
+                                                            }
+                                                            None => break,
+                                                        }
+                                                    }
                                                 }
                                             }
                                         }

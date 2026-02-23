@@ -32,7 +32,11 @@ impl<M> MempoolCollector<M> {
     }
 
     /// Sets the maximum number of concurrent transaction lookups.
+    ///
+    /// # Panics
+    /// Panics if `max` is `0`.
     pub fn with_max_concurrent_lookups(mut self, max: usize) -> Self {
+        assert!(max > 0, "max_concurrent_lookups must be greater than 0");
         self.max_concurrent_lookups = max;
         self
     }

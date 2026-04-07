@@ -151,10 +151,7 @@ where
                 let mut retries = 0u32;
                 loop {
                     let mut event_stream = match collector.get_event_stream().await {
-                        Ok(s) => {
-                            retries = 0;
-                            s
-                        }
+                        Ok(s) => s,
                         Err(e) => {
                             retries += 1;
                             error!("collector stream creation failed (attempt {retries}): {e}");
@@ -166,13 +163,18 @@ where
                             continue;
                         }
                     };
+                    let mut received_events = false;
                     while let Some(event) = event_stream.next().await {
+                        received_events = true;
                         match event_sender.send(event) {
                             Ok(_) => {}
                             Err(e) => error!("error sending event: {e}"),
                         }
                     }
                     // Stream ended (WS disconnected)
+                    if received_events {
+                        retries = 0;
+                    }
                     retries += 1;
                     warn!("collector stream ended (attempt {retries}), retrying...");
                     if retries >= 3 {

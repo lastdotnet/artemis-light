@@ -98,7 +98,7 @@ where
     ///
     /// Returns a [`CancellationToken`] that can be used to shut down the engine,
     /// and a [`JoinSet`] that can be used to await task completion.
-    pub async fn run(self) -> Result<(CancellationToken, JoinSet<()>), Box<dyn std::error::Error>> {
+    pub async fn run(mut self) -> Result<(CancellationToken, JoinSet<()>), Box<dyn std::error::Error>> {
         let (event_sender, _): (Sender<E>, _) = broadcast::channel(self.event_channel_capacity);
         let (action_sender, _): (Sender<A>, _) = broadcast::channel(self.action_channel_capacity);
 
@@ -138,6 +138,20 @@ where
             });
         }
 
+        // Sync all strategies before spawning tasks so failures propagate to the caller.
+        // Cancellation is respected during sync via the token.
+        for strategy in &mut self.strategies {
+            info!("syncing strategy state...");
+            tokio::select! {
+                _ = token.cancelled() => {
+                    return Err("engine cancelled during strategy sync".into());
+                }
+                result = strategy.sync_state() => {
+                    result?;
+                }
+            }
+        }
+
         // Spawn strategies (they subscribe to events before collectors start emitting).
         for mut strategy in self.strategies {
             let mut event_receiver = event_sender.subscribe();
@@ -145,19 +159,6 @@ where
             let child = token.child_token();
 
             set.spawn(async move {
-                info!("syncing strategy state...");
-                tokio::select! {
-                    _ = child.cancelled() => {
-                        info!("strategy cancelled during sync");
-                        return;
-                    }
-                    result = strategy.sync_state() => {
-                        if let Err(e) = result {
-                            error!("failed to sync strategy state: {}", e);
-                            return;
-                        }
-                    }
-                }
                 info!("starting strategy... ");
                 loop {
                     tokio::select! {

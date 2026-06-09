@@ -48,7 +48,13 @@ where
                 .watch_full_blocks()
                 .await?
                 .into_stream()
-                .filter_map(|block| block.map(|block| block.header).ok())
+                .filter_map(|block| match block {
+                    Ok(block) => Some(block.header),
+                    Err(e) => {
+                        warn!("Error polling full block; skipping: {e}");
+                        None
+                    }
+                })
                 .map(|header| NewBlock {
                     hash: header.hash,
                     number: header.number,

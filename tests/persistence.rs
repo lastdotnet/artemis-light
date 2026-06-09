@@ -382,6 +382,58 @@ async fn event_collector_with_persistence_records_against_anvil() {
     assert!(store.last_block("value_set").await.unwrap().unwrap() > 0);
 }
 
+/// A stored payload that cannot be deserialized into its event type (a code or
+/// schema change, or corruption) must surface as a subscribe error rather than
+/// be silently dropped — strategies must never be handed a quietly truncated
+/// history.
+#[tokio::test]
+async fn persisted_replay_fails_loudly_on_unreadable_payload() {
+    let store = Arc::new(SqliteStore::connect("sqlite::memory:").await.unwrap());
+
+    // Seed a row whose `_payload` is not valid JSON for `ValueSet`.
+    let payload_schema = TableSchema::new("value_set").col("_payload", SqlType::Text);
+    store
+        .write_block(
+            &payload_schema,
+            5,
+            vec![Row(vec![SqlValue::Text("not a valid payload".into())])],
+        )
+        .await
+        .unwrap();
+
+    let collector = FakeCollector::default().tip(5);
+    let persisted = collector.with_persistence(store.clone());
+
+    let result = persisted.subscribe().await;
+    assert!(
+        result.is_err(),
+        "an unreadable stored payload must fail the subscribe, not be silently skipped"
+    );
+}
+
+/// The engine re-subscribes after a stream ends. The full stored history must
+/// be replayed only on the first subscribe; a reconnect must not re-send the
+/// entire archive to strategies — the backfill segment already covers the gap.
+#[tokio::test]
+async fn persisted_does_not_replay_history_on_resubscribe() {
+    let store = Arc::new(SqliteStore::connect("sqlite::memory:").await.unwrap());
+    seed(&store, 5, 1).await;
+    seed(&store, 6, 2).await;
+
+    // Tip equals the last stored block, so there is no gap to backfill; the
+    // live stream carries the next event.
+    let collector = FakeCollector::default().live(vec![(7, 3)]).tip(6);
+    let persisted = collector.with_persistence(store.clone());
+
+    // First subscribe: stored history (1, 2) replayed, then live (3).
+    let first: Vec<ValueSet> = persisted.subscribe().await.unwrap().collect().await;
+    assert_eq!(first, vec![value_event(1), value_event(2), value_event(3)]);
+
+    // Reconnect: stored history must NOT be replayed again — only live flows.
+    let second: Vec<ValueSet> = persisted.subscribe().await.unwrap().collect().await;
+    assert_eq!(second, vec![value_event(3)]);
+}
+
 /// A store that fails `write_block` for one specific block, delegating
 /// everything else to an inner [`SqliteStore`].
 struct FlakyStore {

@@ -2,6 +2,7 @@
 //! on subscribe, replays stored history before following the chain tip.
 
 use std::any::TypeId;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use alloy::sol_types::SolEvent;
 use anyhow::Result;
@@ -47,12 +48,22 @@ impl<E, C: PersistableCollector<E> + Sized> PersistExt<E> for C {}
 pub struct Persisted<C, S> {
     collector: C,
     store: S,
+    /// Whether stored history has already been replayed to a subscriber. The
+    /// engine re-subscribes after a stream ends, and replaying the full archive
+    /// on every reconnect would re-deliver the entire history to strategies —
+    /// so the replay segment runs only on the first subscribe; thereafter the
+    /// backfill segment alone covers the gap since the last stored block.
+    replayed: AtomicBool,
 }
 
 impl<C, S> Persisted<C, S> {
     /// Pair `collector` with `store`. Prefer [`PersistExt::with_persistence`].
     pub fn new(collector: C, store: S) -> Self {
-        Self { collector, store }
+        Self {
+            collector,
+            store,
+            replayed: AtomicBool::new(false),
+        }
     }
 }
 
@@ -73,8 +84,18 @@ where
         let table = resolved_table::<E, S>(&self.store);
         let last = self.store.last_block(&table).await?;
 
-        // 1. Replay stored history, reconstructed from the database.
-        let replayed = replay_stored::<E, S>(&self.store, table, last).await?;
+        // 1. Replay stored history, reconstructed from the database — but only
+        //    on the first subscribe. On a reconnect the engine subscribes again;
+        //    re-emitting the whole archive would re-deliver every historical
+        //    event to strategies, so subsequent subscribes skip replay and let
+        //    the backfill segment cover only the gap since the last stored block.
+        let replayed: CollectorStream<'_, E> = if self.replayed.load(Ordering::SeqCst) {
+            Box::pin(futures::stream::empty()) as CollectorStream<'_, E>
+        } else {
+            let stream = replay_stored::<E, S>(&self.store, table, last).await?;
+            self.replayed.store(true, Ordering::SeqCst);
+            stream
+        };
 
         // 2. Backfill the RPC gap `[last+1 ..= tip]`. These are complete blocks,
         //    so the trailing block is flushed too (`flush_final = true`).
@@ -89,6 +110,15 @@ where
         //    an "open" block only when a higher block arrives, so the final
         //    in-progress block is left unflushed (`flush_final = false`) and
         //    re-fetched on restart.
+        //
+        //    The disjoint split assumes the backfill query reliably covers block
+        //    `tip`. If an RPC node's `eth_getLogs` lags behind its reported tip,
+        //    a log at exactly `tip` could be missing from the backfill yet
+        //    dropped here by the `> tip` filter — present in neither segment. A
+        //    fully robust fix needs per-log identity (block + log index) to
+        //    overlap the segments and de-duplicate; `(u64, E)` does not carry
+        //    that today, so it is deferred rather than reversing the deliberate
+        //    no-duplicate guarantee. See PR #18 / the boundary de-dup test.
         let live_source = Box::pin(live_source.filter(move |(block, _)| {
             let above_cut = *block > tip;
             async move { above_cut }
@@ -129,14 +159,16 @@ where
 
     let payload_schema = TableSchema::new(table).col(PAYLOAD_COLUMN, SqlType::Text);
     let rows = store.replay(&payload_schema, to).await?;
+    // A stored row that cannot be reconstructed is a hard error, not a row to
+    // skip: replay feeds strategies the historical view they reason over, and
+    // `_artemis_progress` already counts these blocks as processed. Silently
+    // omitting them would hand strategies a quietly truncated history, so we
+    // fail the subscribe (the engine retries, surfacing the problem) instead.
     let mut events = Vec::with_capacity(rows.len());
     for Row(cols) in rows {
         match cols.into_iter().next() {
-            Some(SqlValue::Text(payload)) => match from_payload::<E>(&payload) {
-                Ok(event) => events.push(event),
-                Err(e) => tracing::error!("failed to reconstruct stored event: {e}"),
-            },
-            other => tracing::error!("unexpected payload column on replay: {other:?}"),
+            Some(SqlValue::Text(payload)) => events.push(from_payload::<E>(&payload)?),
+            other => anyhow::bail!("unexpected payload column on replay: {other:?}"),
         }
     }
     Ok(Box::pin(futures::stream::iter(events)))

@@ -81,16 +81,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     engine.add_strategy(Box::new(my_strategy));
     engine.add_executor(Box::new(my_executor));
 
-    let (cancel_token, mut join_set) = engine.run().await?;
+    let mut handle = engine.run().await?;
 
-    // Run until Ctrl-C
-    tokio::signal::ctrl_c().await?;
-    cancel_token.cancel();
-    while join_set.join_next().await.is_some() {}
+    // Run until Ctrl-C, or until a collector becomes unrecoverable.
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {}
+        _ = handle.fatal.cancelled() => {
+            tracing::error!("collector unrecoverable; restarting");
+        }
+    }
+    let fatal = handle.fatal.is_cancelled();
+    handle.token.cancel();
+    while handle.tasks.join_next().await.is_some() {}
 
+    // The library never calls `process::exit`; the binary decides. Exiting
+    // non-zero lets an orchestrator restart the process with a fresh sync.
+    if fatal {
+        std::process::exit(1);
+    }
     Ok(())
 }
 ```
+
+On a persistent WebSocket disconnect (or a stream that can never be
+established), each collector retries with exponential backoff up to a
+configurable threshold (`Engine::with_reconnect_config`). Once exhausted, the
+engine cancels every task and fires `handle.fatal` — an observe-only token that
+lets the binary tell a fatal shutdown apart from a Ctrl-C one and restart,
+rather than the library killing the process.
 
 ## Testing
 

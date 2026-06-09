@@ -306,7 +306,7 @@ async fn test_complete_flow() {
     impl Executor<NumberAction> for NumberExecutor {
         async fn execute(&mut self, action: NumberAction) -> Result<()> {
             // Send response: true if number is even, false if odd
-            let success = action.number % 2 == 0;
+            let success = action.number.is_multiple_of(2);
             action.response_tx.send(success).unwrap();
             Ok(())
         }

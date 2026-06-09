@@ -79,3 +79,54 @@ pub enum SqlValue {
 /// [`TableSchema::columns`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct Row(pub Vec<SqlValue>);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sql_type_maps_to_create_table_keyword() {
+        assert_eq!(SqlType::Integer.sql(), "INTEGER");
+        assert_eq!(SqlType::Real.sql(), "REAL");
+        assert_eq!(SqlType::Text.sql(), "TEXT");
+        assert_eq!(SqlType::Blob.sql(), "BLOB");
+        assert_eq!(SqlType::Numeric.sql(), "NUMERIC");
+    }
+
+    #[test]
+    fn column_new_accepts_str_and_string() {
+        assert_eq!(
+            Column::new("amount", SqlType::Numeric),
+            Column {
+                name: "amount".to_string(),
+                ty: SqlType::Numeric,
+            }
+        );
+        // `impl Into<String>` so an owned String works too.
+        assert_eq!(
+            Column::new(String::from("amount"), SqlType::Numeric).name,
+            "amount"
+        );
+    }
+
+    #[test]
+    fn table_schema_builder_appends_columns_in_order() {
+        let schema = TableSchema::new("transfer")
+            .col("from", SqlType::Text)
+            .col("amount", SqlType::Numeric);
+
+        assert_eq!(schema.table, "transfer");
+        assert_eq!(
+            schema.columns,
+            vec![
+                Column::new("from", SqlType::Text),
+                Column::new("amount", SqlType::Numeric),
+            ]
+        );
+    }
+
+    #[test]
+    fn new_table_schema_starts_empty() {
+        assert!(TableSchema::new("transfer").columns.is_empty());
+    }
+}

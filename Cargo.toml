@@ -29,3 +29,7 @@ tracing = "0.1.41"
 [[example]]
 name = "basic_example"
 path = "examples/basic_example.rs"
+
+[[example]]
+name = "persistence_example"
+path = "examples/persistence_example.rs"

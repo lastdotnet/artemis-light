@@ -183,3 +183,71 @@ fn to_snake_case(s: &str) -> String {
     }
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn snake_case_splits_on_each_uppercase() {
+        assert_eq!(to_snake_case("ValueSet"), "value_set");
+        assert_eq!(to_snake_case("Transfer"), "transfer");
+        assert_eq!(to_snake_case("ERC20Transfer"), "e_r_c20_transfer");
+        // camelCase: no leading underscore.
+        assert_eq!(to_snake_case("valueSet"), "value_set");
+        // Already snake / single word are unchanged.
+        assert_eq!(to_snake_case("value"), "value");
+        assert_eq!(to_snake_case("already_snake"), "already_snake");
+        assert_eq!(to_snake_case(""), "");
+    }
+
+    #[test]
+    fn infer_type_is_a_best_guess_from_json() {
+        assert_eq!(infer_type(&json!(true)), SqlType::Integer);
+        assert_eq!(infer_type(&json!(7)), SqlType::Integer);
+        assert_eq!(infer_type(&json!(u64::MAX)), SqlType::Integer);
+        assert_eq!(infer_type(&json!(1.5)), SqlType::Real);
+        assert_eq!(infer_type(&json!("0x2a")), SqlType::Text);
+        // Arrays, objects and null fall back to JSON text.
+        assert_eq!(infer_type(&json!([1, 2])), SqlType::Text);
+        assert_eq!(infer_type(&json!({"a": 1})), SqlType::Text);
+        assert_eq!(infer_type(&json!(null)), SqlType::Text);
+    }
+
+    #[test]
+    fn json_to_sql_converts_scalars_directly() {
+        assert_eq!(json_to_sql(&json!(null)), SqlValue::Null);
+        assert_eq!(json_to_sql(&json!(true)), SqlValue::Integer(1));
+        assert_eq!(json_to_sql(&json!(false)), SqlValue::Integer(0));
+        assert_eq!(json_to_sql(&json!(-7)), SqlValue::Integer(-7));
+        assert_eq!(json_to_sql(&json!(1.5)), SqlValue::Real(1.5));
+        assert_eq!(
+            json_to_sql(&json!("0x2a")),
+            SqlValue::Text("0x2a".to_string())
+        );
+    }
+
+    #[test]
+    fn json_to_sql_keeps_a_u64_above_i64_max_as_integer() {
+        // u64::MAX does not fit in i64; it is reinterpreted via `as i64` rather
+        // than spilling to Real, matching SQLite's 64-bit integer storage.
+        let big = u64::MAX;
+        assert_eq!(
+            json_to_sql(&json!(big)),
+            SqlValue::Integer(big as i64) // == -1
+        );
+    }
+
+    #[test]
+    fn json_to_sql_stores_compound_values_as_json_text() {
+        assert_eq!(
+            json_to_sql(&json!([1, 2])),
+            SqlValue::Text("[1,2]".to_string())
+        );
+        assert_eq!(
+            json_to_sql(&json!({"a": 1})),
+            SqlValue::Text("{\"a\":1}".to_string())
+        );
+    }
+}

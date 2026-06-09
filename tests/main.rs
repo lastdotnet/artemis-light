@@ -615,4 +615,62 @@ mod engine_tests {
 
         while handle.tasks.join_next().await.is_some() {}
     }
+
+    /// A collector that escalates to `Fatal` *while* a strategy is still
+    /// syncing. The root-token cancellation must not be reported as a generic
+    /// `Err` — `run` must hand back an `EngineHandle` with `fatal` set so the
+    /// caller still observes the fatal cause and follows the documented exit
+    /// path. Regression test for the fatal-during-sync handle loss.
+    #[tokio::test]
+    async fn test_engine_fatal_during_sync_returns_handle() {
+        use artemis_light::engine::reconnect::ReconnectConfig;
+        use std::time::Duration;
+
+        /// Always yields an empty stream — the subscription ends at once.
+        struct EndingCollector;
+
+        #[async_trait]
+        impl Collector<u32> for EndingCollector {
+            async fn get_event_stream(&self) -> Result<CollectorStream<'_, u32>> {
+                Ok(Box::pin(futures::stream::empty::<u32>()))
+            }
+        }
+
+        /// Strategy whose sync outlives the collector's escalation window.
+        struct SlowSyncStrategy;
+
+        #[async_trait]
+        impl Strategy<u32, u32> for SlowSyncStrategy {
+            async fn sync_state(&mut self) -> Result<()> {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                Ok(())
+            }
+            async fn process_event(&mut self, event: u32) -> Result<ActionStream<'_, u32>> {
+                Ok(Box::pin(futures::stream::iter(vec![event])))
+            }
+        }
+
+        let mut engine = Engine::<u32, u32>::default().with_reconnect_config(ReconnectConfig {
+            max_failures: 2,
+            base_delay: Duration::from_millis(10),
+        });
+        engine.add_collector(Box::new(EndingCollector));
+        engine.add_strategy(Box::new(SlowSyncStrategy));
+
+        let mut handle = tokio::time::timeout(Duration::from_secs(1), engine.run())
+            .await
+            .expect("run did not return within 1 s")
+            .expect("fatal during sync should return Ok(handle), not Err");
+
+        assert!(
+            handle.fatal.is_cancelled(),
+            "fatal cause should be observable on the returned handle"
+        );
+        assert!(
+            handle.token.is_cancelled(),
+            "root token should be cancelled on fatal escalation"
+        );
+
+        while handle.tasks.join_next().await.is_some() {}
+    }
 }

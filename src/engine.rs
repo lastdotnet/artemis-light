@@ -266,6 +266,18 @@ where
             info!("syncing strategy state...");
             tokio::select! {
                 _ = token.cancelled() => {
+                    // A collector may have escalated to `Fatal` during sync,
+                    // cancelling the root token. Hand back the handle so the
+                    // caller still observes `fatal` (already cancelled) and
+                    // follows the documented exit path. Only a caller-initiated
+                    // cancellation (fatal unset) is a plain error.
+                    if fatal.is_cancelled() {
+                        return Ok(EngineHandle {
+                            token,
+                            tasks: set,
+                            fatal,
+                        });
+                    }
                     return Err("engine cancelled during strategy sync".into());
                 }
                 result = strategy.sync_state() => {

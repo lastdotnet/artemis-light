@@ -83,14 +83,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut handle = engine.run().await?;
 
-    // Run until Ctrl-C, or until a collector becomes unrecoverable.
-    tokio::select! {
-        _ = tokio::signal::ctrl_c() => {}
+    // Run until Ctrl-C, or until a collector becomes unrecoverable. Bind the
+    // outcome to the branch that actually won the `select!` — don't re-check
+    // `handle.fatal.is_cancelled()` afterwards, or a Ctrl-C that races a fatal
+    // cancellation gets mislabeled as a collector failure.
+    let fatal = tokio::select! {
+        _ = tokio::signal::ctrl_c() => false,
         _ = handle.fatal.cancelled() => {
             tracing::error!("collector unrecoverable; restarting");
+            true
         }
-    }
-    let fatal = handle.fatal.is_cancelled();
+    };
     handle.token.cancel();
     while handle.tasks.join_next().await.is_some() {}
 

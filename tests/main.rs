@@ -583,7 +583,7 @@ mod engine_tests {
 
         #[async_trait]
         impl Collector<u32> for EndingCollector {
-            async fn get_event_stream(&self) -> Result<CollectorStream<'_, u32>> {
+            async fn subscribe(&self) -> Result<CollectorStream<'_, u32>> {
                 Ok(Box::pin(futures::stream::empty::<u32>()))
             }
         }
@@ -631,7 +631,7 @@ mod engine_tests {
 
         #[async_trait]
         impl Collector<u32> for EndingCollector {
-            async fn get_event_stream(&self) -> Result<CollectorStream<'_, u32>> {
+            async fn subscribe(&self) -> Result<CollectorStream<'_, u32>> {
                 Ok(Box::pin(futures::stream::empty::<u32>()))
             }
         }

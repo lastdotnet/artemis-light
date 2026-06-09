@@ -17,6 +17,10 @@ The sink that carries out actions in an external domain (submitting a tx, postin
 **Engine**:
 The orchestrator that spawns every Collector, Strategy, and Executor as a task and fans events/actions between them over broadcast channels.
 
+**Observer**:
+A passive consumer of the pipeline: one more subscriber on the Engine's event and action channels, seeing everything Strategies and Executors see while producing and perturbing nothing. Observation is best-effort (a lagging Observer skips messages like any consumer) and infallible by design — there is no error channel through which observing could fail the pipeline. Events and actions each arrive in channel order; no ordering holds between the two.
+_Avoid_: metrics, instrument, monitor, telemetry hook
+
 **Reconnect Policy**:
 The per-Collector state machine that decides, after a stream is lost or never established, whether to **Retry** (after a backoff delay) or declare the Collector **Fatal** (unrecoverable). It owns the consecutive-failure counter and the backoff curve; it performs no I/O and keeps no clock — the **Collector Driver** supplies timing and cancellation.
 _Avoid_: retry handler, supervisor, backoff helper
@@ -28,6 +32,14 @@ _Avoid_: supervisor, collector task, reconnect loop
 **Fatal**:
 The Reconnect Policy's verdict that a Collector cannot recover. The Engine responds by cancelling a dedicated, observe-only **fatal token** (the reason) and then the root token (tearing down every task), so the binary can tell a fatal shutdown apart from a caller-initiated one and restart the process with a fresh sync — never by killing the host process itself.
 _Avoid_: crash, panic, die
+
+**Merge**:
+A combinator that interleaves two or more Collectors into one composite Collector. Events arrive in whichever order the sources produce them. All sources subscribe eagerly when the composite subscribes; any creation failure fails the composite's subscribe, so the failure feeds the Reconnect Policy's counter instead of vanishing.
+_Avoid_: combine, join, fan-in (the Engine's channel-level fan-in is a different thing)
+
+**Chain**:
+A combinator that delivers two or more Collectors' streams strictly in sequence — the next source's events are held back until the previous source's stream ends. Sources still subscribe eagerly at the composite's subscribe, so a later live source buffers at its source rather than missing events while earlier segments drain (the same head-buffering rationale as the Persisted Collector's subscribe). Any creation failure fails the whole subscribe.
+_Avoid_: concat, append
 
 **Persisted Collector**:
 A Collector wrapper that records every event it sees into a Store and, on subscribe, delivers three **Segments** in fixed order: **Replay**, then **Backfill**, then the **Live Tail**.
@@ -51,9 +63,11 @@ _Avoid_: live stream, subscription
 ## Relationships
 
 - An **Engine** spawns one **Collector Driver** per **Collector**; each Driver owns one **Reconnect Policy** instance.
+- A **Merge** or **Chain** composite is one **Collector** to the **Engine**: its sources share one **Collector Driver** and one **Reconnect Policy** (one lifecycle). Register sources as separate Collectors instead when each should reconnect — and go **Fatal** — independently.
 - A **Reconnect Policy** counts consecutive stream failures and resets that count only when its **Collector Driver** reports a delivered event.
 - A **Persisted Collector** pairs one **Collector** (block-aware) with one Store; its subscription is the chain Replay → Backfill → Live Tail.
 - A **Fatal** verdict cancels the observe-only fatal token, then the root token shared by all **Collector**, **Strategy**, and **Executor** tasks; the binary observes the fatal token and decides to exit.
+- An **Engine** spawns one task per **Observer**, subscribed to both channels; an Observer has no feedback path into the pipeline.
 
 ## Example dialogue
 

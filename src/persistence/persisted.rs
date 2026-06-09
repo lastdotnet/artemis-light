@@ -1,7 +1,6 @@
 //! [`Persisted`]: a [`Collector`] wrapper that records every event it sees and,
 //! on subscribe, replays stored history before following the chain tip.
 
-use std::any::TypeId;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use alloy::sol_types::SolEvent;
@@ -48,6 +47,11 @@ impl<E, C: PersistableCollector<E> + Sized> PersistExt<E> for C {}
 pub struct Persisted<C, S> {
     collector: C,
     store: S,
+    /// The declared schema for this collector's event type, replacing the
+    /// best-guess schema derived from the event signature. A `Persisted` wraps
+    /// exactly one event type, so the override is a plain field here — the
+    /// Store never needs to know which event type a row came from.
+    schema: Option<TableSchema>,
     /// Whether stored history has already been replayed to a subscriber. The
     /// engine re-subscribes after a stream ends, and replaying the full archive
     /// on every reconnect would re-deliver the entire history to strategies —
@@ -62,8 +66,18 @@ impl<C, S> Persisted<C, S> {
         Self {
             collector,
             store,
+            schema: None,
             replayed: AtomicBool::new(false),
         }
+    }
+
+    /// Persist events under `schema` instead of the best-guess schema derived
+    /// from the event signature: rows go to `schema`'s table with its listed
+    /// columns (event fields it does not list are dropped; the lossless
+    /// payload column is always appended).
+    pub fn with_schema(mut self, schema: TableSchema) -> Self {
+        self.schema = Some(schema);
+        self
     }
 }
 
@@ -107,8 +121,12 @@ where
         let live_source = self.collector.subscribe_indexed().await?;
         let tip = self.collector.tip().await?;
 
-        // The table name follows any registered override.
-        let table = resolved_table::<E, S>(&self.store);
+        // The table name follows the declared schema, if any.
+        let table = self
+            .schema
+            .as_ref()
+            .map(|schema| schema.table.clone())
+            .unwrap_or_else(table_name::<E>);
         let last = self.store.last_block(&table).await?;
 
         // 1. Replay stored history, reconstructed from the database — but only
@@ -127,7 +145,7 @@ where
         //    so the trailing block is flushed too (`flush_final = true`).
         let backfill_from = last.map(|l| l + 1).unwrap_or(0);
         let backfill_source = self.collector.query_range(backfill_from, tip).await?;
-        let backfill = persist_and_emit(backfill_source, &self.store, true);
+        let backfill = persist_and_emit(backfill_source, &self.store, self.schema.as_ref(), true);
 
         // Only now — after every fallible setup step has succeeded — mark the
         // replay segment as consumed. The engine retries `subscribe` when it
@@ -158,7 +176,7 @@ where
             let above_cut = *block > tip;
             async move { above_cut }
         })) as CollectorStream<'_, (u64, E)>;
-        let live = persist_and_emit(live_source, &self.store, false);
+        let live = persist_and_emit(live_source, &self.store, self.schema.as_ref(), false);
 
         Ok(Segments {
             replay,
@@ -167,19 +185,6 @@ where
         }
         .into_stream())
     }
-}
-
-/// The resolved table name for event type `E`: an override's table if one is
-/// registered on `store`, otherwise the best-guess name from the signature.
-fn resolved_table<E, S>(store: &S) -> String
-where
-    E: SolEvent + 'static,
-    S: Store,
-{
-    store
-        .schema_override(TypeId::of::<E>())
-        .map(|schema| schema.table)
-        .unwrap_or_else(table_name::<E>)
 }
 
 /// Replay stored events up to and including `last`, reconstructed from each
@@ -224,6 +229,7 @@ where
 fn persist_and_emit<'a, E, S>(
     mut source: CollectorStream<'a, (u64, E)>,
     store: &'a S,
+    override_: Option<&'a TableSchema>,
     flush_final: bool,
 ) -> CollectorStream<'a, E>
 where
@@ -231,7 +237,6 @@ where
     S: Store + 'a,
 {
     let stream = async_stream::stream! {
-        let override_ = store.schema_override(TypeId::of::<E>());
         let mut buffer: Vec<Row> = Vec::new();
         let mut current: Option<u64> = None;
         let mut schema: Option<TableSchema> = None;
@@ -241,7 +246,7 @@ where
         let mut healthy = true;
 
         while let Some((block, event)) = source.next().await {
-            match derive_record_with(&event, override_.as_ref()) {
+            match derive_record_with(&event, override_) {
                 Ok((row_schema, row)) => {
                     // The block advanced: the previous block is complete.
                     if healthy

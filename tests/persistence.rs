@@ -1,6 +1,7 @@
 //! Behaviour tests for the persistence layer, exercised through its public API.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use alloy::node_bindings::{Anvil, AnvilInstance};
 use alloy::primitives::{Address, U256};
@@ -64,6 +65,9 @@ struct FakeCollector {
     live: Vec<(u64, u64)>,
     backfill: Vec<(u64, u64)>,
     tip: u64,
+    /// Number of leading `query_range` calls that should error before the rest
+    /// succeed — used to simulate a transient RPC backfill failure.
+    query_range_fails: AtomicUsize,
 }
 
 impl FakeCollector {
@@ -77,6 +81,10 @@ impl FakeCollector {
     }
     fn tip(mut self, tip: u64) -> Self {
         self.tip = tip;
+        self
+    }
+    fn fail_query_range_times(self, n: usize) -> Self {
+        self.query_range_fails.store(n, Ordering::SeqCst);
         self
     }
 }
@@ -103,6 +111,12 @@ impl PersistableCollector<ValueSet> for FakeCollector {
         from: u64,
         to: u64,
     ) -> Result<CollectorStream<'_, (u64, ValueSet)>> {
+        let remaining = self.query_range_fails.load(Ordering::SeqCst);
+        if remaining > 0 {
+            self.query_range_fails
+                .store(remaining - 1, Ordering::SeqCst);
+            anyhow::bail!("simulated query_range failure");
+        }
         let events: Vec<_> = self
             .backfill
             .iter()
@@ -521,6 +535,35 @@ async fn persisted_does_not_replay_history_on_resubscribe() {
     // Reconnect: stored history must NOT be replayed again — only live flows.
     let second: Vec<ValueSet> = persisted.subscribe().await.unwrap().collect().await;
     assert_eq!(second, vec![value_event(3)]);
+}
+
+/// A failed subscribe must not consume the replay-once flag. If a fallible step
+/// after the DB replay (here the RPC backfill query) errors, the engine retries
+/// `subscribe`; that retry must still replay the stored history rather than skip
+/// it — otherwise the archive never reaches strategies and is lost for good.
+#[tokio::test]
+async fn failed_subscribe_does_not_consume_replay() {
+    let store = Arc::new(SqliteStore::connect("sqlite::memory:").await.unwrap());
+    seed(&store, 5, 1).await;
+    seed(&store, 6, 2).await;
+
+    // The first backfill query errors; subsequent ones succeed.
+    let collector = FakeCollector::default()
+        .live(vec![(7, 3)])
+        .tip(6)
+        .fail_query_range_times(1);
+    let persisted = collector.with_persistence(store.clone());
+
+    // First subscribe fails because the RPC backfill query errors.
+    assert!(
+        persisted.subscribe().await.is_err(),
+        "a failing backfill query must fail the subscribe"
+    );
+
+    // Retry: the stored history (1, 2) must still be replayed — the failed
+    // attempt must not have flipped the replay-once flag.
+    let events: Vec<ValueSet> = persisted.subscribe().await.unwrap().collect().await;
+    assert_eq!(events, vec![value_event(1), value_event(2), value_event(3)]);
 }
 
 /// A store that fails `write_block` for one specific block, delegating

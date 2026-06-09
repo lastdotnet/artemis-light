@@ -89,12 +89,11 @@ where
         //    re-emitting the whole archive would re-deliver every historical
         //    event to strategies, so subsequent subscribes skip replay and let
         //    the backfill segment cover only the gap since the last stored block.
-        let replayed: CollectorStream<'_, E> = if self.replayed.load(Ordering::SeqCst) {
-            Box::pin(futures::stream::empty()) as CollectorStream<'_, E>
+        let first_subscribe = !self.replayed.load(Ordering::SeqCst);
+        let replayed: CollectorStream<'_, E> = if first_subscribe {
+            replay_stored::<E, S>(&self.store, table, last).await?
         } else {
-            let stream = replay_stored::<E, S>(&self.store, table, last).await?;
-            self.replayed.store(true, Ordering::SeqCst);
-            stream
+            Box::pin(futures::stream::empty()) as CollectorStream<'_, E>
         };
 
         // 2. Backfill the RPC gap `[last+1 ..= tip]`. These are complete blocks,
@@ -102,6 +101,15 @@ where
         let backfill_from = last.map(|l| l + 1).unwrap_or(0);
         let backfill_source = self.collector.query_range(backfill_from, tip).await?;
         let backfill = persist_and_emit(backfill_source, &self.store, true);
+
+        // Only now — after every fallible setup step has succeeded — mark the
+        // replay segment as consumed. The engine retries `subscribe` when it
+        // returns an error, so flipping this flag earlier (e.g. right after
+        // `replay_stored`) would make a retry skip the DB replay while backfill
+        // covers only blocks after `last`, stranding the stored history.
+        if first_subscribe {
+            self.replayed.store(true, Ordering::SeqCst);
+        }
 
         // 3. Live tail, strictly above the backfill cut so the two segments are
         //    disjoint. A live subscription streams from "now", whose lower edge

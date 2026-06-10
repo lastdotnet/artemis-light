@@ -2,6 +2,8 @@
 
 A stripped-down, modernised fork of the [Artemis](https://github.com/paradigmxyz/artemis) MEV framework, built on [Alloy](https://github.com/alloy-rs/alloy) and Tokio.
 
+**[API documentation](https://andreaskoestler.github.io/artemis-light/)**
+
 ## Architecture
 
 Artemis-light is an **event-processing pipeline** composed of three pluggable stages wired together by an engine:
@@ -125,7 +127,7 @@ Add the dependency to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-artemis-light = { git = "https://github.com/hypurrfi/artemis-light" }
+artemis-light = { git = "https://github.com/AndreasKoestler/artemis-light" }
 ```
 
 ### Minimal example
@@ -200,3 +202,15 @@ Lint checks:
 cargo fmt --all -- --check
 RUSTFLAGS="-Dwarnings" cargo clippy --all-features
 ```
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md). For security issues, please follow
+[SECURITY.md](SECURITY.md) instead of opening a public issue.
+
+## License
+
+Licensed under the [Apache License, Version 2.0](LICENSE).
+
+This project is a derivative of [Artemis](https://github.com/paradigmxyz/artemis)
+by Paradigm, also licensed under Apache-2.0; see [NOTICE](NOTICE).
